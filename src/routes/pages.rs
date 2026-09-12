@@ -31,6 +31,7 @@ struct LoginTemplate<'a> {
 struct AdminTemplate<'a> {
     csrf_token: &'a str,
     username: &'a str,
+    is_admin: bool,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -90,18 +91,19 @@ async fn admin_page(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
         return (jar, Html("Unauthorized".to_string())).into_response();
     };
 
-    let user_row =
-        sqlx::query_as::<_, (String, bool)>("SELECT username, is_admin FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None);
+    let user_row = sqlx::query_as::<_, (String, bool, bool)>(
+        "SELECT username, is_admin, can_upload_pools FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
 
-    let Some((username, is_admin)) = user_row else {
+    let Some((username, is_admin, can_upload_pools)) = user_row else {
         return (jar, Html("Forbidden".to_string())).into_response();
     };
 
-    if !is_admin {
+    if !is_admin && !can_upload_pools {
         return (jar, Html("Forbidden".to_string())).into_response();
     }
 
@@ -109,6 +111,7 @@ async fn admin_page(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     let page = AdminTemplate {
         csrf_token: &csrf,
         username: &username,
+        is_admin,
     };
     (
         jar,

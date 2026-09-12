@@ -26,8 +26,10 @@
 
       <nav class="admin-tabs">
         <button class="admin-tab active" data-tab="tab-pools">Pools</button>
+        {% if is_admin %}
         <button class="admin-tab" data-tab="tab-tiers">Tiers</button>
         <button class="admin-tab" data-tab="tab-users">Users</button>
+        {% endif %}
       </nav>
 
       <!-- Pools tab -->
@@ -39,8 +41,9 @@
             <input name="name" type="text" required />
           </div>
           <div class="form-group">
-            <label>Tier ID</label>
-            <input name="tier_id" type="number" required />
+            <label for="upload-tier">Tier</label>
+            <select name="tier_id" id="upload-tier" required></select>
+            <small class="form-hint">You can only publish pools at your own tier or lower.</small>
           </div>
           <div class="form-group">
             <label>CSV File</label>
@@ -51,6 +54,7 @@
         <div id="upload-status"></div>
       </section>
 
+      {% if is_admin %}
       <!-- Tiers tab -->
       <section class="admin-tab-content" id="tab-tiers">
         <h3>Create Tier</h3>
@@ -81,18 +85,24 @@
             <input name="password" type="password" required />
           </div>
           <div class="form-group">
-            <label>Tier ID</label>
-            <input name="tier_id" type="number" required />
+            <label for="user-tier">Tier</label>
+            <select name="tier_id" id="user-tier" required></select>
           </div>
           <div class="form-group">
             <label class="checkbox-label">
               <input name="is_admin" type="checkbox" /> Admin
             </label>
           </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input name="can_upload_pools" type="checkbox" /> Can upload question pools
+            </label>
+          </div>
           <button type="submit" class="btn-primary">Create</button>
         </form>
         <div id="users-table"></div>
       </section>
+      {% endif %}
     </div>
   </main>
 

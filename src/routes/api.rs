@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::{
     models::{QuestionPool, Tier, User},
-    services::{audit, auth, generator, security},
+    services::{audit, auth, authz, generator, security},
     state::AppState,
 };
 
@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pools", get(list_pools).post(upload_pool))
         .route("/api/pools/:id", axum::routing::delete(delete_pool))
         .route("/api/pools/:id/books", get(pool_books))
+        .route("/api/tiers", get(list_assignable_tiers))
         .route("/api/generate", post(generate))
         .route("/api/admin/tiers", get(list_tiers).post(create_tier))
         .route("/api/admin/tiers/:id", put(update_tier).delete(delete_tier))
@@ -66,6 +67,69 @@ async fn require_admin(state: &AppState, jar: &CookieJar) -> Result<i32, Respons
     }
 
     Ok(user_id)
+}
+
+fn forbidden(message: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
+}
+
+fn pool_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": "Pool not found"})),
+    )
+        .into_response()
+}
+
+/// Single gate for reading a pool: resolves the caller and rejects pools above their tier.
+async fn authorize_pool_access(
+    state: &AppState,
+    jar: &CookieJar,
+    pool_id: i32,
+) -> Result<(authz::Actor, authz::PoolAccess), Response> {
+    let actor = authz::load_actor(&state.pool, jar).await;
+
+    let pool = match authz::load_pool_access(&state.pool, pool_id).await {
+        Ok(Some(pool)) => pool,
+        Ok(None) => return Err(pool_not_found()),
+        Err(error) => {
+            tracing::error!(pool_id, error = %error, "failed to load pool for authorization");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to load pool"})),
+            )
+                .into_response());
+        }
+    };
+
+    if !authz::can_access_pool(&actor, pool.tier_rank) {
+        return Err(forbidden("Tier access denied"));
+    }
+
+    Ok((actor, pool))
+}
+
+/// Tiers the caller is permitted to assign when uploading a pool.
+async fn list_assignable_tiers(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+    let actor = authz::load_actor(&state.pool, &jar).await;
+
+    let tiers = sqlx::query_as::<_, Tier>(
+        "SELECT id, name, rank FROM tiers WHERE $1 OR rank <= $2 ORDER BY rank ASC",
+    )
+    .bind(actor.is_admin)
+    .bind(actor.tier_rank)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "tiers": tiers,
+            "can_upload_pools": authz::can_upload(&actor),
+        })),
+    )
+        .into_response()
 }
 
 async fn health() -> impl IntoResponse {
@@ -117,7 +181,7 @@ async fn login(
     }
 
     let row = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, is_admin, tier_id, created_at FROM users WHERE username = $1",
+        "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE username = $1",
     )
     .bind(&payload.username)
     .fetch_optional(&state.pool)
@@ -246,7 +310,7 @@ async fn me(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse 
     };
 
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, is_admin, tier_id, created_at FROM users WHERE id = $1",
+        "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE id = $1",
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -259,6 +323,7 @@ async fn me(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse 
                 "id": u.id,
                 "username": u.username,
                 "is_admin": u.is_admin,
+                "can_upload_pools": u.can_upload_pools,
                 "tier_id": u.tier_id,
             })),
         )
@@ -272,35 +337,32 @@ async fn me(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse 
 }
 
 async fn list_pools(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    let user_tier_rank = if let Some(user_id) = auth::get_user_id_from_jar(&state.pool, &jar).await
-    {
-        sqlx::query_scalar::<_, i32>(
-            "SELECT t.rank FROM users u JOIN tiers t ON u.tier_id = t.id WHERE u.id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
+    let actor = authz::load_actor(&state.pool, &jar).await;
 
-    let pools = sqlx::query_as::<_, (i32, String, i32, String)>(
-        "SELECT qp.id, qp.name, qp.tier_id, t.name as tier_name
+    let pools = sqlx::query_as::<_, (i32, String, i32, String, i32, Option<i32>)>(
+        "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank, qp.created_by
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
-         WHERE t.rank <= $1
+         WHERE $1 OR t.rank <= $2
          ORDER BY qp.created_at DESC",
     )
-    .bind(user_tier_rank)
+    .bind(actor.is_admin)
+    .bind(actor.tier_rank)
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
 
     let lightweight: Vec<_> = pools
         .into_iter()
-        .map(|(id, name, tier_id, tier_name)| {
-            json!({"id": id, "name": name, "tier_id": tier_id, "tier_name": tier_name})
+        .map(|(id, name, tier_id, tier_name, tier_rank, created_by)| {
+            json!({
+                "id": id,
+                "name": name,
+                "tier_id": tier_id,
+                "tier_name": tier_name,
+                "tier_rank": tier_rank,
+                "can_delete": authz::can_delete_pool(&actor, created_by),
+            })
         })
         .collect();
 
@@ -321,9 +383,16 @@ async fn upload_pool(
             .into_response();
     }
 
-    let user_id = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return resp,
+    let actor = authz::load_actor(&state.pool, &jar).await;
+    if !authz::can_upload(&actor) {
+        return forbidden("You do not have permission to upload question pools");
+    }
+    let Some(user_id) = actor.user_id else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Not authenticated"})),
+        )
+            .into_response();
     };
 
     let mut pool_name: Option<String> = None;
@@ -353,6 +422,30 @@ async fn upload_pool(
             .into_response();
     };
 
+    // The requested tier is never trusted from the client; re-check it against the uploader.
+    let requested_tier_rank = match authz::tier_rank(&state.pool, tier).await {
+        Ok(Some(rank)) => rank,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Unknown tier"})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(tier_id = tier, error = %error, "failed to load tier for upload");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to validate tier"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !authz::can_assign_pool_tier(&actor, requested_tier_rank) {
+        return forbidden("You cannot create a pool above your own tier");
+    }
+
     // Validate the CSV before storing
     let validation = generator::validate_csv(&csv);
     if !validation.errors.is_empty() {
@@ -367,13 +460,14 @@ async fn upload_pool(
     }
 
     let inserted = sqlx::query_as::<_, QuestionPool>(
-        "INSERT INTO question_pools (name, tier_id, csv_text)
-            VALUES ($1, $2, $3)
-            RETURNING id, name, tier_id, csv_text, created_at, updated_at",
+        "INSERT INTO question_pools (name, tier_id, csv_text, created_by)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, name, tier_id, csv_text, created_by, created_at, updated_at",
     )
     .bind(&name)
     .bind(tier)
     .bind(&csv)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await;
 
@@ -386,7 +480,7 @@ async fn upload_pool(
                     action: "pool.uploaded",
                     target_type: "question_pool",
                     target_id: Some(pool.id.to_string()),
-                    metadata: json!({"name": pool.name}),
+                    metadata: json!({"name": pool.name, "tier_id": pool.tier_id}),
                     ip_address: Some(security::client_ip(&headers)),
                     user_agent: security::user_agent(&headers),
                 },
@@ -430,10 +524,21 @@ async fn delete_pool(
             .into_response();
     }
 
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return resp,
+    let actor = authz::load_actor(&state.pool, &jar).await;
+    let Some(owner) = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT created_by FROM question_pools WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None) else {
+        return pool_not_found();
     };
+
+    if !authz::can_delete_pool(&actor, owner) {
+        return forbidden("You cannot delete this pool");
+    }
+    let actor_id = actor.user_id;
 
     let deleted =
         sqlx::query_scalar::<_, i32>("DELETE FROM question_pools WHERE id = $1 RETURNING id")
@@ -447,7 +552,7 @@ async fn delete_pool(
             audit::log_event(
                 &state.pool,
                 audit::AuditEvent {
-                    actor_user_id: Some(actor),
+                    actor_user_id: actor_id,
                     action: "pool.deleted",
                     target_type: "question_pool",
                     target_id: Some(pool_id.to_string()),
@@ -480,63 +585,28 @@ async fn pool_books(
     Path(id): Path<i32>,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let user_id = auth::get_user_id_from_jar(&state.pool, &jar).await;
-
-    let rows = sqlx::query_as::<_, (i32, String, i32)>(
-        "SELECT id, name, tier_id FROM question_pools WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await;
-
-    let Ok(Some((pool_id, _pool_name, pool_tier_id))) = rows else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Pool not found"})),
-        )
-            .into_response();
+    let pool = match authorize_pool_access(&state, &jar, id).await {
+        Ok((_, pool)) => pool,
+        Err(resp) => return resp,
     };
 
-    let tiers = sqlx::query_as::<_, Tier>("SELECT id, name, rank FROM tiers")
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
-
-    let user_rank = if let Some(uid) = user_id {
-        sqlx::query_scalar::<_, i32>(
-            "SELECT t.rank FROM users u JOIN tiers t ON u.tier_id = t.id WHERE u.id = $1",
-        )
-        .bind(uid)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let pool_rank = tiers
-        .iter()
-        .find(|t| t.id == pool_tier_id)
-        .map(|t| t.rank)
-        .unwrap_or(0);
-
-    if pool_rank > user_rank {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Tier access denied"})),
-        )
-            .into_response();
-    }
-
-    let Some(parsed) = parsed_pool(&state, pool_id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Pool not found"})),
-        )
-            .into_response();
+    let Some(parsed) = parsed_pool(&state, pool.id).await else {
+        return pool_not_found();
     };
     let books = generator::list_books(parsed.as_ref());
-    (StatusCode::OK, Json(json!({"books": books}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "books": books,
+            "pool": {
+                "id": pool.id,
+                "name": pool.name,
+                "tier_id": pool.tier_id,
+                "tier_name": pool.tier_name,
+            },
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -563,60 +633,15 @@ async fn generate(
             .into_response();
     }
 
-    let user_id = auth::get_user_id_from_jar(&state.pool, &jar).await;
-
-    let rows = sqlx::query_as::<_, (i32, String, i32)>(
-        "SELECT id, name, tier_id FROM question_pools WHERE id = $1",
-    )
-    .bind(body.pool_id)
-    .fetch_optional(&state.pool)
-    .await;
-
-    let Ok(Some((pool_id, _pool_name, pool_tier_id))) = rows else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Pool not found"})),
-        )
-            .into_response();
+    let (actor, source_pool) = match authorize_pool_access(&state, &jar, body.pool_id).await {
+        Ok(authorized) => authorized,
+        Err(resp) => return resp,
     };
-
-    let tiers = sqlx::query_as::<_, Tier>("SELECT id, name, rank FROM tiers")
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
-
-    let user_rank = if let Some(uid) = user_id {
-        sqlx::query_scalar::<_, i32>(
-            "SELECT t.rank FROM users u JOIN tiers t ON u.tier_id = t.id WHERE u.id = $1",
-        )
-        .bind(uid)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let pool_rank = tiers
-        .iter()
-        .find(|t| t.id == pool_tier_id)
-        .map(|t| t.rank)
-        .unwrap_or(0);
-
-    if pool_rank > user_rank {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Tier access denied"})),
-        )
-            .into_response();
-    }
+    let user_id = actor.user_id;
+    let pool_id = source_pool.id;
 
     let Some(parsed) = parsed_pool(&state, pool_id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Pool not found"})),
-        )
-            .into_response();
+        return pool_not_found();
     };
     enum GenerationSource {
         Cached(Arc<Vec<generator::QuestionRecord>>),
@@ -696,7 +721,19 @@ async fn generate(
     )
     .await;
 
-    (StatusCode::OK, Json(json!({"questions": generated}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "questions": generated,
+            "pool": {
+                "id": source_pool.id,
+                "name": source_pool.name,
+                "tier_id": source_pool.tier_id,
+                "tier_name": source_pool.tier_name,
+            },
+        })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -895,6 +932,8 @@ struct CreateUserBody {
     password: String,
     tier_id: i32,
     is_admin: bool,
+    #[serde(default)]
+    can_upload_pools: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -902,6 +941,8 @@ struct UpdateUserBody {
     username: String,
     tier_id: i32,
     is_admin: bool,
+    #[serde(default)]
+    can_upload_pools: bool,
     password: Option<String>,
 }
 
@@ -911,7 +952,7 @@ async fn list_users(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     }
 
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, is_admin, tier_id, created_at FROM users ORDER BY created_at DESC",
+        "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
     .await
@@ -919,7 +960,7 @@ async fn list_users(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
 
     let safe: Vec<_> = users
         .into_iter()
-        .map(|u| json!({"id": u.id, "username": u.username, "tier_id": u.tier_id, "is_admin": u.is_admin, "created_at": u.created_at}))
+        .map(|u| json!({"id": u.id, "username": u.username, "tier_id": u.tier_id, "is_admin": u.is_admin, "can_upload_pools": u.can_upload_pools, "created_at": u.created_at}))
         .collect();
 
     (StatusCode::OK, Json(json!({"users": safe}))).into_response()
@@ -953,14 +994,15 @@ async fn create_user(
     };
 
     let inserted = sqlx::query_as::<_, User>(
-        "INSERT INTO users (username, password_hash, tier_id, is_admin)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, username, password_hash, is_admin, tier_id, created_at",
+        "INSERT INTO users (username, password_hash, tier_id, is_admin, can_upload_pools)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
     )
     .bind(body.username)
     .bind(password_hash)
     .bind(body.tier_id)
     .bind(body.is_admin)
+    .bind(body.can_upload_pools)
     .fetch_one(&state.pool)
     .await;
 
@@ -973,7 +1015,7 @@ async fn create_user(
                     action: "user.created",
                     target_type: "user",
                     target_id: Some(user.id.to_string()),
-                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin}),
+                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools}),
                     ip_address: Some(security::client_ip(&headers)),
                     user_agent: security::user_agent(&headers),
                 },
@@ -986,7 +1028,8 @@ async fn create_user(
                     "id": user.id,
                     "username": user.username,
                     "tier_id": user.tier_id,
-                    "is_admin": user.is_admin
+                    "is_admin": user.is_admin,
+                    "can_upload_pools": user.can_upload_pools
                 })),
             )
                 .into_response()
@@ -1038,13 +1081,14 @@ async fn update_user(
 
         sqlx::query_as::<_, User>(
             "UPDATE users
-             SET username = $1, tier_id = $2, is_admin = $3, password_hash = $4
-             WHERE id = $5
-             RETURNING id, username, password_hash, is_admin, tier_id, created_at",
+             SET username = $1, tier_id = $2, is_admin = $3, can_upload_pools = $4, password_hash = $5
+             WHERE id = $6
+             RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
         )
         .bind(body.username)
         .bind(body.tier_id)
         .bind(body.is_admin)
+        .bind(body.can_upload_pools)
         .bind(password_hash)
         .bind(id)
         .fetch_optional(&state.pool)
@@ -1052,13 +1096,14 @@ async fn update_user(
     } else {
         sqlx::query_as::<_, User>(
             "UPDATE users
-             SET username = $1, tier_id = $2, is_admin = $3
-             WHERE id = $4
-             RETURNING id, username, password_hash, is_admin, tier_id, created_at",
+             SET username = $1, tier_id = $2, is_admin = $3, can_upload_pools = $4
+             WHERE id = $5
+             RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
         )
         .bind(body.username)
         .bind(body.tier_id)
         .bind(body.is_admin)
+        .bind(body.can_upload_pools)
         .bind(id)
         .fetch_optional(&state.pool)
         .await
@@ -1073,7 +1118,7 @@ async fn update_user(
                     action: "user.updated",
                     target_type: "user",
                     target_id: Some(user.id.to_string()),
-                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin}),
+                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools}),
                     ip_address: Some(security::client_ip(&headers)),
                     user_agent: security::user_agent(&headers),
                 },
@@ -1086,7 +1131,8 @@ async fn update_user(
                     "id": user.id,
                     "username": user.username,
                     "tier_id": user.tier_id,
-                    "is_admin": user.is_admin
+                    "is_admin": user.is_admin,
+                    "can_upload_pools": user.can_upload_pools
                 })),
             )
                 .into_response()

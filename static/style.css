@@ -486,6 +486,19 @@ input[type="radio"]:checked::after {
 .set-heading:first-child { margin-top: 0.5rem; }
 .set-heading h3 { margin: 0; font-size: 1rem; color: var(--accent2); }
 
+.set-source {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.form-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .set-count {
   font-size: 0.75rem;
   color: var(--muted);

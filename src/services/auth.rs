@@ -43,8 +43,8 @@ pub async fn create_default_admin(
 
     let hash = hash_password(password)?;
     sqlx::query(
-        "INSERT INTO users (username, password_hash, is_admin, tier_id)
-         SELECT $1, $2, true, id FROM tiers ORDER BY rank ASC LIMIT 1",
+        "INSERT INTO users (username, password_hash, is_admin, can_upload_pools, tier_id)
+         SELECT $1, $2, true, true, id FROM tiers ORDER BY rank DESC LIMIT 1",
     )
     .bind(username)
     .bind(hash)

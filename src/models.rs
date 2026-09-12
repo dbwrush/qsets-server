@@ -8,6 +8,7 @@ pub struct User {
     pub username: String,
     pub password_hash: String,
     pub is_admin: bool,
+    pub can_upload_pools: bool,
     pub tier_id: i32,
     pub created_at: DateTime<Utc>,
 }
@@ -25,6 +26,7 @@ pub struct QuestionPool {
     pub name: String,
     pub tier_id: i32,
     pub csv_text: String,
+    pub created_by: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

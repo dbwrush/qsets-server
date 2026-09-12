@@ -17,6 +17,7 @@ let availableBooks = [];
 let generatedSets = [];
 let generatedRoundNames = [];
 let lastSelectedBookFilters = [];
+let generatedPool = null;
 
 // Wizard navigation
 function showStep(id) {
@@ -211,6 +212,7 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
       });
       sets.push(data.questions || []);
       names.push(`${prefix}${i + 1}`);
+      if (data.pool) generatedPool = data.pool;
     }
 
     generatedSets = sets;
@@ -224,8 +226,17 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
   }
 });
 
+function poolSourceLabel() {
+  if (!generatedPool) return "";
+  return `${generatedPool.name} (${generatedPool.tier_name} tier)`;
+}
+
 function displayResults(sets, prefix) {
   const container = document.getElementById("setResults");
+  const source = poolSourceLabel();
+  const sourceHtml = source
+    ? `<p class="set-source">Source pool: ${escapeHtml(source)}</p>`
+    : "";
   const html = sets.map((set, si) => {
     const label = `${prefix}${si + 1}`;
     const qs = set.map((q, qi) => `
@@ -242,7 +253,7 @@ function displayResults(sets, prefix) {
       <div class="question-set">${qs}</div>`;
   }).join("");
 
-  container.innerHTML = html;
+  container.innerHTML = sourceHtml + html;
   showStep("results");
 
   const cb = document.getElementById("showAnswers");
@@ -272,8 +283,10 @@ function triggerDownload(filename, content, mimeType) {
 }
 
 function generateSectionTag(filters) {
-  if (!filters || filters.length === 0) return "Generated Set";
-  return filters.map(f => f.start_chapter === f.end_chapter ? `${f.name} ${f.start_chapter}` : `${f.name} ${f.start_chapter}-${f.end_chapter}`).join(", ");
+  const source = poolSourceLabel();
+  if (!filters || filters.length === 0) return source || "Generated Set";
+  const range = filters.map(f => f.start_chapter === f.end_chapter ? `${f.name} ${f.start_chapter}` : `${f.name} ${f.start_chapter}-${f.end_chapter}`).join(", ");
+  return source ? `${source} \u2014 ${range}` : range;
 }
 
 function buildRtf(roundNames, sets, sectionTag) {
@@ -295,7 +308,12 @@ function buildQset(roundNames, sets) {
   const out = {};
   sets.forEach((set, i) => {
     const name = roundNames[i] || `SET #${i + 1}`;
-    out[name] = { round: name, questions: set.map((q, qi) => ({ number: qi + 1, type: q.type, reference: q.reference })) };
+    out[name] = {
+      round: name,
+      pool: generatedPool ? generatedPool.name : undefined,
+      tier: generatedPool ? generatedPool.tier_name : undefined,
+      questions: set.map((q, qi) => ({ number: qi + 1, type: q.type, reference: q.reference })),
+    };
   });
   return JSON.stringify(out, null, 2);
 }
