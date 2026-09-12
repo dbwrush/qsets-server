@@ -525,13 +525,13 @@ async fn delete_pool(
     }
 
     let actor = authz::load_actor(&state.pool, &jar).await;
-    let Some(owner) = sqlx::query_scalar::<_, Option<i32>>(
-        "SELECT created_by FROM question_pools WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await
-    .unwrap_or(None) else {
+    let Some(owner) =
+        sqlx::query_scalar::<_, Option<i32>>("SELECT created_by FROM question_pools WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+    else {
         return pool_not_found();
     };
 
