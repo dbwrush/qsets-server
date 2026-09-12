@@ -1,0 +1,10 @@
+-- Synthetic fixture only. These entries are fictional and are not derived from any publication.
+UPDATE question_pools
+SET csv_text = $$Question,Type,Reference,Answer
+What color is the beacon on Moonbase Delta,General,MOON-001,Amber
+Which tool repairs a rover wheel,According-To,MOON-002,A torque key
+Where is the spare map stored,Context,MOON-003,In the blue locker
+What did the crew name the small survey drone,Situation,MOON-004,Comet
+$$,
+    updated_at = NOW()
+WHERE name = 'Sample Questions';
