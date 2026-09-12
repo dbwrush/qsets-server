@@ -43,13 +43,15 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn require_admin(state: &AppState, jar: &CookieJar) -> Result<i32, Response> {
+async fn require_admin(state: &AppState, jar: &CookieJar) -> Result<i32, Box<Response>> {
     let Some(user_id) = auth::get_user_id_from_jar(&state.pool, jar).await else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Not authenticated"})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Not authenticated"})),
+            )
+                .into_response(),
+        ));
     };
 
     let is_admin = sqlx::query_scalar::<_, bool>("SELECT is_admin FROM users WHERE id = $1")
@@ -59,11 +61,13 @@ async fn require_admin(state: &AppState, jar: &CookieJar) -> Result<i32, Respons
         .unwrap_or(false);
 
     if !is_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "Admin required"})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Admin required"})),
+            )
+                .into_response(),
+        ));
     }
 
     Ok(user_id)
@@ -86,24 +90,26 @@ async fn authorize_pool_access(
     state: &AppState,
     jar: &CookieJar,
     pool_id: i32,
-) -> Result<(authz::Actor, authz::PoolAccess), Response> {
+) -> Result<(authz::Actor, authz::PoolAccess), Box<Response>> {
     let actor = authz::load_actor(&state.pool, jar).await;
 
     let pool = match authz::load_pool_access(&state.pool, pool_id).await {
         Ok(Some(pool)) => pool,
-        Ok(None) => return Err(pool_not_found()),
+        Ok(None) => return Err(Box::new(pool_not_found())),
         Err(error) => {
             tracing::error!(pool_id, error = %error, "failed to load pool for authorization");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to load pool"})),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to load pool"})),
+                )
+                    .into_response(),
+            ));
         }
     };
 
     if !authz::can_access_pool(&actor, pool.tier_rank) {
-        return Err(forbidden("Tier access denied"));
+        return Err(Box::new(forbidden("Tier access denied")));
     }
 
     Ok((actor, pool))
@@ -587,7 +593,7 @@ async fn pool_books(
 ) -> impl IntoResponse {
     let pool = match authorize_pool_access(&state, &jar, id).await {
         Ok((_, pool)) => pool,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let Some(parsed) = parsed_pool(&state, pool.id).await else {
@@ -635,7 +641,7 @@ async fn generate(
 
     let (actor, source_pool) = match authorize_pool_access(&state, &jar, body.pool_id).await {
         Ok(authorized) => authorized,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let user_id = actor.user_id;
     let pool_id = source_pool.id;
@@ -750,7 +756,7 @@ struct TierUpdateBody {
 
 async fn list_tiers(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
     if let Err(resp) = require_admin(&state, &jar).await {
-        return resp;
+        return *resp;
     }
 
     let tiers = sqlx::query_as::<_, Tier>("SELECT id, name, rank FROM tiers ORDER BY rank ASC")
@@ -777,7 +783,7 @@ async fn create_tier(
 
     let actor = match require_admin(&state, &jar).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let created = sqlx::query_as::<_, Tier>(
@@ -830,7 +836,7 @@ async fn update_tier(
 
     let actor = match require_admin(&state, &jar).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let updated = sqlx::query_as::<_, Tier>(
@@ -888,7 +894,7 @@ async fn delete_tier(
 
     let actor = match require_admin(&state, &jar).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let deleted = sqlx::query_scalar::<_, i32>("DELETE FROM tiers WHERE id = $1 RETURNING id")
@@ -948,7 +954,7 @@ struct UpdateUserBody {
 
 async fn list_users(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
     if let Err(resp) = require_admin(&state, &jar).await {
-        return resp;
+        return *resp;
     }
 
     let users = sqlx::query_as::<_, User>(
@@ -982,7 +988,7 @@ async fn create_user(
 
     let actor = match require_admin(&state, &jar).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let Ok(password_hash) = auth::hash_password(&body.password) else {
@@ -1059,7 +1065,7 @@ async fn update_user(
 
     let actor = match require_admin(&state, &jar).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if actor == id && !body.is_admin {
@@ -1166,7 +1172,7 @@ async fn delete_user(
 
     let actor = match require_admin(&state, &jar).await {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if actor == id {
