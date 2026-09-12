@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QSets Admin</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <a href="/"><h1>QSets</h1></a>
+    </div>
+    <div class="header-right">
+      <a href="https://qperf.dbwrush.com" class="nav-link">QPerformance</a>
+      <a href="https://qschedule.dbwrush.com" class="nav-link">QuizSchedule</a>
+      <a href="https://www.quizstuff.com" class="nav-link">QuizStuff</a>
+      <span class="user-info">{{ username }}</span>
+      <a href="#" id="logout-link">Logout</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <h2>Admin</h2>
+
+      <nav class="admin-tabs">
+        <button class="admin-tab active" data-tab="tab-pools">Pools</button>
+        <button class="admin-tab" data-tab="tab-tiers">Tiers</button>
+        <button class="admin-tab" data-tab="tab-users">Users</button>
+      </nav>
+
+      <!-- Pools tab -->
+      <section class="admin-tab-content active" id="tab-pools">
+        <h3>Upload Pool CSV</h3>
+        <form id="upload-form" class="create-form">
+          <div class="form-group">
+            <label>Pool Name</label>
+            <input name="name" type="text" required />
+          </div>
+          <div class="form-group">
+            <label>Tier ID</label>
+            <input name="tier_id" type="number" required />
+          </div>
+          <div class="form-group">
+            <label>CSV File</label>
+            <input name="file" type="file" accept=".csv" required />
+          </div>
+          <button type="submit" class="btn-primary">Upload</button>
+        </form>
+        <div id="upload-status"></div>
+      </section>
+
+      <!-- Tiers tab -->
+      <section class="admin-tab-content" id="tab-tiers">
+        <h3>Create Tier</h3>
+        <form id="tier-form" class="create-form">
+          <div class="form-group">
+            <label>Name</label>
+            <input name="name" type="text" required />
+          </div>
+          <div class="form-group">
+            <label>Rank</label>
+            <input name="rank" type="number" min="0" required />
+          </div>
+          <button type="submit" class="btn-primary">Create</button>
+        </form>
+        <div id="tiers-table"></div>
+      </section>
+
+      <!-- Users tab -->
+      <section class="admin-tab-content" id="tab-users">
+        <h3>Create User</h3>
+        <form id="user-form" class="create-form">
+          <div class="form-group">
+            <label>Username</label>
+            <input name="username" type="text" required />
+          </div>
+          <div class="form-group">
+            <label>Password</label>
+            <input name="password" type="password" required />
+          </div>
+          <div class="form-group">
+            <label>Tier ID</label>
+            <input name="tier_id" type="number" required />
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input name="is_admin" type="checkbox" /> Admin
+            </label>
+          </div>
+          <button type="submit" class="btn-primary">Create</button>
+        </form>
+        <div id="users-table"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank">Michael Parenti</a>
+  </footer>
+
+  <script>
+    window.QSETS_CSRF = "{{ csrf_token }}";
+  </script>
+  <script src="/static/admin.js"></script>
+</body>
+</html>

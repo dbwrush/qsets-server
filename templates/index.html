@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QSets — Bible Quiz Set Generator</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <a href="/"><h1>QSets</h1></a>
+    </div>
+    <div class="header-right" id="header-actions">
+      <a href="https://qperf.dbwrush.com" class="nav-link">QPerformance</a>
+      <a href="https://qschedule.dbwrush.com" class="nav-link">QuizSchedule</a>
+      <a href="https://www.quizstuff.com" class="nav-link">QuizStuff</a>
+      <span id="user-status"></span>
+    </div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <!-- Step 1: Pool Selection -->
+      <div class="wizard-step active" id="step-1">
+        <h2>Select Question Pool</h2>
+        <div id="pool-section">
+          <p class="msg-info">Loading pools…</p>
+        </div>
+      </div>
+
+      <!-- Step 2: Book & Chapter Selection -->
+      <div class="wizard-step" id="step-2">
+        <h2>Select Books &amp; Chapters</h2>
+        <div id="bookSelection">
+          <p class="msg-info">Select a pool first.</p>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-ghost" id="backToStep1">Back</button>
+          <button type="button" class="btn-primary" id="nextToStep3">Next</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Generation Options -->
+      <div class="wizard-step" id="step-3">
+        <h2>Generation Options</h2>
+        <div class="options-grid">
+          <div class="form-group">
+            <label for="numSets">Number of Sets</label>
+            <input type="number" id="numSets" min="1" max="20" value="1" />
+          </div>
+          <div class="form-group">
+            <label for="setNamePrefix">Set Name Prefix</label>
+            <input type="text" id="setNamePrefix" value="SET #" placeholder="e.g., SET #, Round " />
+          </div>
+          <div class="form-group">
+            <label for="seedInput">Seed (optional)</label>
+            <input type="number" id="seedInput" placeholder="Random" />
+          </div>
+          <div class="form-group">
+            <label>Question Mode</label>
+            <div class="radio-container">
+              <label class="radio-option">
+                <input type="radio" name="questionType" value="situation" checked />
+                <span class="radio-label">Situation Questions</span>
+              </label>
+              <label class="radio-option">
+                <input type="radio" name="questionType" value="inWhatBook" />
+                <span class="radio-label">In What Book &amp; Chapter</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-ghost" id="backToStep2">Back</button>
+          <button type="button" class="btn-primary" id="generateBtn">Generate</button>
+        </div>
+        <div id="generateStatus"></div>
+      </div>
+
+      <!-- Step 4: Results -->
+      <div class="wizard-step" id="results">
+        <div class="results-header">
+          <h2>Generated Sets</h2>
+          <label class="toggle-answers">
+            <input type="checkbox" id="showAnswers" />
+            <span>Show Answers</span>
+          </label>
+        </div>
+        <div id="setResults"></div>
+        <div class="download-buttons">
+          <button id="downloadRTF" class="btn-download">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download RTF
+          </button>
+          <button id="downloadJSON" class="btn-download">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download QSET
+          </button>
+        </div>
+        <div class="wizard-nav">
+          <button type="button" class="btn-ghost" id="backToStep3">Back to Options</button>
+          <span></span>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank">Michael Parenti</a>
+  </footer>
+
+  <script>
+    window.QSETS_CSRF = "{{ csrf_token }}";
+    window.QSETS_IS_AUTHENTICATED = {{ is_authenticated|lower }};
+    window.QSETS_USERNAME = "{{ username }}";
+  </script>
+  <script src="/static/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+/target
+.env
+.env.development
+.env.testing
+.env.production
+
+# Private question data — must never be committed
+/qsets/
+scripts/seed_sample_questions.sql

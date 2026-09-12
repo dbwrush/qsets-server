@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login - QSets</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <a href="/"><h1>QSets</h1></a>
+    </div>
+    <div class="header-right">
+      <a href="https://qperf.dbwrush.com" class="nav-link">QPerformance</a>
+      <a href="https://qschedule.dbwrush.com" class="nav-link">QuizSchedule</a>
+      <a href="https://www.quizstuff.com" class="nav-link">QuizStuff</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="panel login-container">
+      <h2>Sign In</h2>
+      <form id="login-form" class="login-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" required autofocus />
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required />
+        </div>
+        <button type="submit" class="login-button">Sign In</button>
+        <div id="login-status" class="login-status"></div>
+      </form>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>
+      Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> and <a href="https://msparenti.com" target="_blank">Michael Parenti</a>.
+    </p>
+  </footer>
+
+  <script>
+    window.QSETS_CSRF = "{{ csrf_token }}";
+  </script>
+  <script src="/static/login.js"></script>
+</body>
+</html>
