@@ -84,62 +84,6 @@ cargo run
 
 Server starts at `http://127.0.0.1:3000` by default.
 
-## Deployment Handoff
-
-This repository is intended to be portable. It does not assume a particular domain,
-cloud provider, Linux distribution, reverse proxy, or PostgreSQL host. The eventual
-operator can choose those pieces and run the compiled binary or build their own
-container/package around it.
-
-### Application prerequisites
-
-- Rust toolchain compatible with the current stable release
-- PostgreSQL 14 or newer (the exact supported version should be confirmed by the operator)
-- A process supervisor selected by the operator
-- TLS termination at the chosen reverse proxy when exposed outside localhost
-
-### First-time setup
-
-1. Copy `.env.example` to `.env`, or copy the profile example matching `APP_ENV`.
-2. Set a strong `DATABASE_URL` and `ADMIN_PASSWORD`; do not use the example password.
-3. Create the target PostgreSQL database and ensure the configured role can run migrations.
-4. Start the application. It applies the SQLx migrations automatically on startup.
-5. The configured admin account is created on first startup if that username does not exist.
-6. Sign in, create the desired tiers, and upload the real question pools through `/admin`.
-
-The application binds to `127.0.0.1:3000` by default. A reverse proxy can forward the
-chosen public hostname to that address. Set `COOKIE_SECURE=true` whenever HTTPS is in
-use. Keep the application and PostgreSQL credentials outside source control.
-
-### Operational checklist
-
-Before handing the service to users, verify:
-
-- `GET /api/health` responds successfully through the chosen local/proxy path.
-- Login, logout, session expiry, and admin authorization work.
-- Login and logout requests include the CSRF token issued by the page.
-- Public and restricted tier visibility match the intended policy.
-- Pool upload validation reports the expected valid and skipped row counts.
-- Oversized pool uploads are rejected by the application before processing.
-- Generated RTF and QSET files work with their downstream consumers.
-- PostgreSQL backups and restore procedures have been tested.
-- Logs are collected by the chosen process supervisor.
-- The reverse proxy passes the real client address only when it is trusted.
-
-The application currently has strong unit/integration coverage for CSV parsing and
-generation, but not yet for HTTP routes, PostgreSQL behavior, or browser workflows.
-Those checks should be completed in a staging environment before public release.
-
-## Single-Server Runtime Notes
-
-The application can run as one process with PostgreSQL on the same machine. Axum and
-Tokio handle concurrent network requests, while question generation is moved to the
-runtime's blocking worker pool so CPU-heavy generation does not occupy the async I/O
-workers. A semaphore limits concurrent generation tasks to the number of logical CPUs
-by default; set `GENERATION_CONCURRENCY` lower if the same machine is doing other work.
-Parsed question pools are cached in process for faster repeated generation; up to 16
-pools are retained and the cache is rebuilt after a restart.
-
 ## Test
 
 ```bash
