@@ -545,7 +545,6 @@ async fn delete_pool(
         return forbidden("You cannot delete this pool");
     }
     let actor_id = actor.user_id;
-
     let deleted =
         sqlx::query_scalar::<_, i32>("DELETE FROM question_pools WHERE id = $1 RETURNING id")
             .bind(id)
