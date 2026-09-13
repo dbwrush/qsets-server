@@ -76,6 +76,16 @@ SQL equivalent:
 psql -U postgres -d postgres -f scripts/create_dev_test_databases.sql
 ```
 
+### Create an admin account
+
+```bash
+./scripts/create_admin_user.sh <username> [password]
+```
+
+Reads `DATABASE_URL` from `.env`/`.env.<APP_ENV>`, prompts for a password if one isn't
+passed as an argument, and hashes it the same way the app does. Safe to re-run: an
+existing username is promoted to admin with the new password instead of failing.
+
 ## Run
 
 ```bash
