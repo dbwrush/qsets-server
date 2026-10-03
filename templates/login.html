@@ -6,7 +6,7 @@
   <title>Login - QSets</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body>
+<body data-csrf="{{ csrf_token }}">
   <header class="header">
     <div class="header-left">
       <a href="/"><h1>QSets</h1></a>
@@ -42,9 +42,6 @@
     </p>
   </footer>
 
-  <script>
-    window.QSETS_CSRF = "{{ csrf_token }}";
-  </script>
   <script src="/static/login.js"></script>
 </body>
 </html>

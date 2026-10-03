@@ -1,3 +1,6 @@
+// Page values arrive as data attributes on <body>; the CSP does not allow inline scripts.
+window.QSETS_CSRF = document.body.dataset.csrf;
+
 // API helper
 async function adminApi(url, options = {}) {
   const headers = Object.assign({}, options.headers || {});

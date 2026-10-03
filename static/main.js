@@ -1,3 +1,8 @@
+// Page values arrive as data attributes on <body>; the CSP does not allow inline scripts.
+window.QSETS_CSRF = document.body.dataset.csrf;
+window.QSETS_IS_AUTHENTICATED = document.body.dataset.authenticated === "true";
+window.QSETS_USERNAME = document.body.dataset.username || "";
+
 // API helper with CSRF support
 async function api(url, options = {}) {
   const headers = Object.assign({}, options.headers || {});

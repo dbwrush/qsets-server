@@ -15,6 +15,8 @@ Rust/Axum + Askama web server for Nazarene Bible quizzing question pools with ti
 - Session login with Argon2 password verification
 - CSRF token checks on mutating API endpoints
 - Login attempt throttling
+- Signs a user out of their other sessions when their password changes
+- Content-Security-Policy and related security headers on every response
 - Tier-based pool visibility with inherited lower-tier access
 - Admin endpoints and UI for pool upload, tier creation, and user creation
 - Audit logging for login/logout, generation, pool upload, tier creation, user creation
@@ -41,6 +43,11 @@ Copy `.env.example` to `.env`, then optionally add an environment-specific overr
 - `ADMIN_PASSWORD`
 - `COOKIE_SECURE`
 - `GENERATION_CONCURRENCY`
+- `TRUST_PROXY` (default `false`): set to `true` only when a reverse proxy sets
+  `X-Forwarded-For`. When false the header is ignored, because clients could otherwise
+  forge it to dodge login throttling and falsify audit-log IPs.
+- `STATIC_DIR` (default `static`): location of the CSS/JS assets. Relative paths resolve
+  against the working directory; templates are compiled into the binary.
 
 Runtime loading order:
 
@@ -86,6 +93,14 @@ Reads `DATABASE_URL` from `.env`/`.env.<APP_ENV>`, prompts for a password if one
 passed as an argument, and hashes it the same way the app does. Safe to re-run: an
 existing username is promoted to admin with the new password instead of failing.
 
+Passwords must be at least 8 characters, whether set by this script, the admin page,
+or `ADMIN_PASSWORD` outside the `development` profile.
+
+### Tiers
+
+Anonymous visitors read at rank 0, so the tier with rank 0 is the public tier. It can be
+renamed but not re-ranked or deleted, and no tier may have a negative rank.
+
 ## Run
 
 ```bash
@@ -119,7 +134,11 @@ container/package around it.
 
 The application binds to `127.0.0.1:3000` by default. A reverse proxy can forward the
 chosen public hostname to that address. Set `COOKIE_SECURE=true` whenever HTTPS is in
-use. Keep the application and PostgreSQL credentials outside source control.
+use, and `TRUST_PROXY=true` when the proxy sets `X-Forwarded-For`. The proxy must replace
+or append to that header rather than pass a client-supplied value through. The server
+uses the right-most entry, so exactly one trusted proxy is assumed. Run the binary from
+the repository root, or set `STATIC_DIR` to the absolute path of `static/`. Keep the
+application and PostgreSQL credentials outside source control.
 
 ### Operational checklist
 
@@ -136,9 +155,10 @@ Before handing the service to users, verify:
 - Logs are collected by the chosen process supervisor.
 - The reverse proxy passes the real client address only when it is trusted.
 
-The application currently has strong unit/integration coverage for CSV parsing and
-generation, but not yet for HTTP routes, PostgreSQL behavior, or browser workflows.
-Those checks should be completed in a staging environment before public release.
+Automated tests cover CSV parsing, generation, and the HTTP routes against PostgreSQL
+(tier access, upload permissions, CSRF, login throttling, session revocation). Browser
+workflows and the downstream use of generated files are not automated yet and should be
+checked in a staging environment before public release.
 
 ## Single-Server Runtime Notes
 
@@ -163,6 +183,16 @@ cargo test
 ```
 
 Parity tests are in `tests/generator_parity.rs`.
+
+HTTP route tests in `tests/http_routes.rs` need a running PostgreSQL. Each test creates
+and drops its own throwaway database on the server in `DATABASE_URL` (read from the
+environment or `.env`), so that role needs `CREATEDB`. Your app data is not touched,
+but sqlx keeps a small `_sqlx_test` bookkeeping schema in the database named in the URL.
+
+If they fail with `template database "template1" has a collation version mismatch`,
+the OS C library was upgraded after the cluster was created. Fix the cluster
+(`ALTER DATABASE template1 REFRESH COLLATION VERSION`, after reindexing as the hint
+describes), or point `DATABASE_URL` at another server.
 
 ### Local load testing
 

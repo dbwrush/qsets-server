@@ -7,7 +7,18 @@ use chrono::{Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const SESSION_COOKIE: &str = "qsets_session";
+pub const SESSION_COOKIE: &str = "qsets_session";
+pub const MIN_PASSWORD_LEN: usize = 8;
+
+/// Shared password policy for every path that sets a password.
+pub fn validate_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(format!(
+            "Password must be at least {MIN_PASSWORD_LEN} characters long"
+        ));
+    }
+    Ok(())
+}
 
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -98,11 +109,37 @@ pub async fn destroy_session(pool: &PgPool, token: &str) {
         .await;
 }
 
+pub fn session_token(jar: &CookieJar) -> Option<Uuid> {
+    Uuid::parse_str(jar.get(SESSION_COOKIE)?.value()).ok()
+}
+
+/// Signs a user out of every session except `keep`, e.g. after their password changes.
+/// `keep` lets an admin change their own password without logging themselves out.
+pub async fn revoke_user_sessions<'e, E>(
+    executor: E,
+    user_id: i32,
+    keep: Option<Uuid>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND ($2::uuid IS NULL OR token <> $2)")
+        .bind(user_id)
+        .bind(keep)
+        .execute(executor)
+        .await
+        .map(|result| result.rows_affected())
+}
+
+pub async fn delete_expired_sessions(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    sqlx::query("DELETE FROM sessions WHERE expires_at <= NOW()")
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected())
+}
+
 pub async fn get_user_id_from_jar(pool: &PgPool, jar: &CookieJar) -> Option<i32> {
-    let token = jar.get(SESSION_COOKIE)?.value().to_string();
-    let Ok(parsed) = Uuid::parse_str(&token) else {
-        return None;
-    };
+    let parsed = session_token(jar)?;
 
     sqlx::query_scalar::<_, i32>(
         "SELECT s.user_id
@@ -114,4 +151,16 @@ pub async fn get_user_id_from_jar(pool: &PgPool, jar: &CookieJar) -> Option<i32>
     .await
     .ok()
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_policy_enforces_minimum_length() {
+        assert!(validate_password("").is_err());
+        assert!(validate_password("short").is_err());
+        assert!(validate_password("eightchr").is_ok());
+    }
 }

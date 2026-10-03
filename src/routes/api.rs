@@ -77,6 +77,26 @@ fn forbidden(message: &str) -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
 }
 
+fn bad_request(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+}
+
+fn conflict(message: &str) -> Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+fn tier_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": "Tier not found"})),
+    )
+        .into_response()
+}
+
 fn pool_not_found() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -146,11 +166,12 @@ async fn parsed_pool(
     state: &AppState,
     pool_id: i32,
 ) -> Option<Arc<Vec<generator::QuestionRecord>>> {
-    let mut cache = state.parsed_pools.write().await;
-    if let Some(cached) = cache.get(pool_id) {
+    if let Some(cached) = state.parsed_pools.read().await.get(pool_id) {
         return Some(cached);
     }
 
+    // Load and parse without holding the lock so cache hits for other pools are never blocked.
+    // Concurrent misses for the same pool may both parse it; the second insert is harmless.
     let csv_text =
         sqlx::query_scalar::<_, String>("SELECT csv_text FROM question_pools WHERE id = $1")
             .bind(pool_id)
@@ -159,13 +180,18 @@ async fn parsed_pool(
             .ok()
             .flatten()?;
     let parsed = Arc::new(generator::parse_csv(&csv_text));
-    cache.insert(pool_id, parsed.clone());
+    state
+        .parsed_pools
+        .write()
+        .await
+        .insert(pool_id, parsed.clone());
     Some(parsed)
 }
 
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
@@ -177,7 +203,7 @@ async fn login(
             .into_response();
     }
 
-    let key = format!("{}:{}", payload.username, security::client_ip(&headers));
+    let key = format!("{}:{}", payload.username, client.ip);
     if !security::allow_login_attempt(&key).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -203,8 +229,8 @@ async fn login(
                 target_type: "user",
                 target_id: Some(payload.username),
                 metadata: json!({"reason": "user_not_found"}),
-                ip_address: Some(security::client_ip(&headers)),
-                user_agent: security::user_agent(&headers),
+                ip_address: Some(client.ip.clone()),
+                user_agent: client.user_agent.clone(),
             },
         )
         .await;
@@ -225,8 +251,8 @@ async fn login(
                 target_type: "user",
                 target_id: Some(user.id.to_string()),
                 metadata: json!({"reason": "invalid_password"}),
-                ip_address: Some(security::client_ip(&headers)),
-                user_agent: security::user_agent(&headers),
+                ip_address: Some(client.ip.clone()),
+                user_agent: client.user_agent.clone(),
             },
         )
         .await;
@@ -257,8 +283,8 @@ async fn login(
             target_type: "user",
             target_id: Some(user.id.to_string()),
             metadata: json!({}),
-            ip_address: Some(security::client_ip(&headers)),
-            user_agent: security::user_agent(&headers),
+            ip_address: Some(client.ip.clone()),
+            user_agent: client.user_agent.clone(),
         },
     )
     .await;
@@ -270,6 +296,7 @@ async fn login(
 async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
 ) -> impl IntoResponse {
     if !security::verify_csrf(&jar, &headers) {
@@ -282,7 +309,7 @@ async fn logout(
 
     let user_id = auth::get_user_id_from_jar(&state.pool, &jar).await;
 
-    if let Some(token) = jar.get("qsets_session").map(|c| c.value().to_string()) {
+    if let Some(token) = jar.get(auth::SESSION_COOKIE).map(|c| c.value().to_string()) {
         auth::destroy_session(&state.pool, &token).await;
     }
 
@@ -295,8 +322,8 @@ async fn logout(
                 target_type: "user",
                 target_id: Some(actor.to_string()),
                 metadata: json!({}),
-                ip_address: Some(security::client_ip(&headers)),
-                user_agent: security::user_agent(&headers),
+                ip_address: Some(client.ip.clone()),
+                user_agent: client.user_agent.clone(),
             },
         )
         .await;
@@ -378,6 +405,7 @@ async fn list_pools(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
 async fn upload_pool(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
@@ -427,6 +455,10 @@ async fn upload_pool(
         )
             .into_response();
     };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return bad_request("Pool name must not be empty");
+    }
 
     // The requested tier is never trusted from the client; re-check it against the uploader.
     let requested_tier_rank = match authz::tier_rank(&state.pool, tier).await {
@@ -487,8 +519,8 @@ async fn upload_pool(
                     target_type: "question_pool",
                     target_id: Some(pool.id.to_string()),
                     metadata: json!({"name": pool.name, "tier_id": pool.tier_id}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
@@ -508,17 +540,24 @@ async fn upload_pool(
             )
                 .into_response()
         }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Insert failed"})),
-        )
-            .into_response(),
+        Err(error) if is_unique_violation(&error) => {
+            conflict("A pool with that name already exists; delete it first or choose another name")
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "failed to insert pool");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Insert failed"})),
+            )
+                .into_response()
+        }
     }
 }
 
 async fn delete_pool(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Path(id): Path<i32>,
 ) -> impl IntoResponse {
@@ -562,8 +601,8 @@ async fn delete_pool(
                     target_type: "question_pool",
                     target_id: Some(pool_id.to_string()),
                     metadata: json!({}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
@@ -627,6 +666,7 @@ struct GenerateBody {
 async fn generate(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Json(body): Json<GenerateBody>,
 ) -> impl IntoResponse {
@@ -720,8 +760,8 @@ async fn generate(
             target_type: "question_pool",
             target_id: Some(pool_id.to_string()),
             metadata: json!({"count": generated.len()}),
-            ip_address: Some(security::client_ip(&headers)),
-            user_agent: security::user_agent(&headers),
+            ip_address: Some(client.ip.clone()),
+            user_agent: client.user_agent.clone(),
         },
     )
     .await;
@@ -769,6 +809,7 @@ async fn list_tiers(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
 async fn create_tier(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Json(body): Json<TierCreateBody>,
 ) -> impl IntoResponse {
@@ -785,10 +826,18 @@ async fn create_tier(
         Err(resp) => return *resp,
     };
 
+    let name = body.name.trim();
+    if name.is_empty() {
+        return bad_request("Tier name must not be empty");
+    }
+    if let Err(message) = authz::validate_tier_rank(None, body.rank) {
+        return bad_request(message);
+    }
+
     let created = sqlx::query_as::<_, Tier>(
         "INSERT INTO tiers (name, rank) VALUES ($1, $2) RETURNING id, name, rank",
     )
-    .bind(body.name)
+    .bind(name)
     .bind(body.rank)
     .fetch_one(&state.pool)
     .await;
@@ -803,18 +852,17 @@ async fn create_tier(
                     target_type: "tier",
                     target_id: Some(tier.id.to_string()),
                     metadata: json!({"name": tier.name, "rank": tier.rank}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
             (StatusCode::OK, Json(json!({"tier": tier}))).into_response()
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Failed to create tier"})),
-        )
-            .into_response(),
+        Err(error) if is_unique_violation(&error) => {
+            conflict("A tier with that name or rank already exists")
+        }
+        Err(_) => bad_request("Failed to create tier"),
     }
 }
 
@@ -822,6 +870,7 @@ async fn update_tier(
     State(state): State<AppState>,
     Path(id): Path<i32>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Json(body): Json<TierUpdateBody>,
 ) -> impl IntoResponse {
@@ -838,10 +887,26 @@ async fn update_tier(
         Err(resp) => return *resp,
     };
 
+    let name = body.name.trim();
+    if name.is_empty() {
+        return bad_request("Tier name must not be empty");
+    }
+    let current_rank = match authz::tier_rank(&state.pool, id).await {
+        Ok(Some(rank)) => rank,
+        Ok(None) => return tier_not_found(),
+        Err(error) => {
+            tracing::error!(tier_id = id, error = %error, "failed to load tier");
+            return bad_request("Failed to update tier");
+        }
+    };
+    if let Err(message) = authz::validate_tier_rank(Some(current_rank), body.rank) {
+        return bad_request(message);
+    }
+
     let updated = sqlx::query_as::<_, Tier>(
         "UPDATE tiers SET name = $1, rank = $2 WHERE id = $3 RETURNING id, name, rank",
     )
-    .bind(body.name)
+    .bind(name)
     .bind(body.rank)
     .bind(id)
     .fetch_optional(&state.pool)
@@ -857,23 +922,18 @@ async fn update_tier(
                     target_type: "tier",
                     target_id: Some(tier.id.to_string()),
                     metadata: json!({"name": tier.name, "rank": tier.rank}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
             (StatusCode::OK, Json(json!({"tier": tier}))).into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Tier not found"})),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Failed to update tier"})),
-        )
-            .into_response(),
+        Ok(None) => tier_not_found(),
+        Err(error) if is_unique_violation(&error) => {
+            conflict("A tier with that name or rank already exists")
+        }
+        Err(_) => bad_request("Failed to update tier"),
     }
 }
 
@@ -881,6 +941,7 @@ async fn delete_tier(
     State(state): State<AppState>,
     Path(id): Path<i32>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
 ) -> impl IntoResponse {
     if !security::verify_csrf(&jar, &headers) {
@@ -895,6 +956,18 @@ async fn delete_tier(
         Ok(id) => id,
         Err(resp) => return *resp,
     };
+
+    match authz::tier_rank(&state.pool, id).await {
+        Ok(Some(rank)) if !authz::can_delete_tier(rank) => {
+            return bad_request("The public tier cannot be deleted");
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => return tier_not_found(),
+        Err(error) => {
+            tracing::error!(tier_id = id, error = %error, "failed to load tier");
+            return bad_request("Failed to delete tier");
+        }
+    }
 
     let deleted = sqlx::query_scalar::<_, i32>("DELETE FROM tiers WHERE id = $1 RETURNING id")
         .bind(id)
@@ -911,18 +984,14 @@ async fn delete_tier(
                     target_type: "tier",
                     target_id: Some(tier_id.to_string()),
                     metadata: json!({}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
             (StatusCode::OK, Json(json!({"deleted": tier_id}))).into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Tier not found"})),
-        )
-            .into_response(),
+        Ok(None) => tier_not_found(),
         Err(_) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "Failed to delete tier (possibly in use)"})),
@@ -974,6 +1043,7 @@ async fn list_users(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
 async fn create_user(
     State(state): State<AppState>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Json(body): Json<CreateUserBody>,
 ) -> impl IntoResponse {
@@ -990,12 +1060,15 @@ async fn create_user(
         Err(resp) => return *resp,
     };
 
+    let username = body.username.trim();
+    if username.is_empty() {
+        return bad_request("Username must not be empty");
+    }
+    if let Err(message) = auth::validate_password(&body.password) {
+        return bad_request(&message);
+    }
     let Ok(password_hash) = auth::hash_password(&body.password) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Invalid password"})),
-        )
-            .into_response();
+        return bad_request("Invalid password");
     };
 
     let inserted = sqlx::query_as::<_, User>(
@@ -1003,7 +1076,7 @@ async fn create_user(
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
     )
-    .bind(body.username)
+    .bind(username)
     .bind(password_hash)
     .bind(body.tier_id)
     .bind(body.is_admin)
@@ -1021,8 +1094,8 @@ async fn create_user(
                     target_type: "user",
                     target_id: Some(user.id.to_string()),
                     metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
@@ -1039,11 +1112,8 @@ async fn create_user(
             )
                 .into_response()
         }
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Failed to create user"})),
-        )
-            .into_response(),
+        Err(error) if is_unique_violation(&error) => conflict("That username is already taken"),
+        Err(_) => bad_request("Failed to create user"),
     }
 }
 
@@ -1051,6 +1121,7 @@ async fn update_user(
     State(state): State<AppState>,
     Path(id): Path<i32>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
     Json(body): Json<UpdateUserBody>,
 ) -> impl IntoResponse {
@@ -1075,44 +1146,36 @@ async fn update_user(
             .into_response();
     }
 
-    let updated = if let Some(password) = body.password.as_ref().filter(|p| !p.trim().is_empty()) {
-        let Ok(password_hash) = auth::hash_password(password) else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid password"})),
-            )
-                .into_response();
-        };
+    let username = body.username.trim();
+    if username.is_empty() {
+        return bad_request("Username must not be empty");
+    }
 
-        sqlx::query_as::<_, User>(
-            "UPDATE users
-             SET username = $1, tier_id = $2, is_admin = $3, can_upload_pools = $4, password_hash = $5
-             WHERE id = $6
-             RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
-        )
-        .bind(body.username)
-        .bind(body.tier_id)
-        .bind(body.is_admin)
-        .bind(body.can_upload_pools)
-        .bind(password_hash)
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-    } else {
-        sqlx::query_as::<_, User>(
-            "UPDATE users
-             SET username = $1, tier_id = $2, is_admin = $3, can_upload_pools = $4
-             WHERE id = $5
-             RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
-        )
-        .bind(body.username)
-        .bind(body.tier_id)
-        .bind(body.is_admin)
-        .bind(body.can_upload_pools)
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
+    // A blank password field in the admin UI means "leave unchanged".
+    let new_password = body.password.as_deref().filter(|p| !p.trim().is_empty());
+    let password_hash = match new_password {
+        Some(password) => {
+            if let Err(message) = auth::validate_password(password) {
+                return bad_request(&message);
+            }
+            match auth::hash_password(password) {
+                Ok(hash) => Some(hash),
+                Err(_) => return bad_request("Invalid password"),
+            }
+        }
+        None => None,
     };
+    let password_changed = password_hash.is_some();
+
+    let updated = update_user_record(
+        &state,
+        id,
+        username,
+        &body,
+        password_hash,
+        auth::session_token(&jar),
+    )
+    .await;
 
     match updated {
         Ok(Some(user)) => {
@@ -1123,9 +1186,9 @@ async fn update_user(
                     action: "user.updated",
                     target_type: "user",
                     target_id: Some(user.id.to_string()),
-                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools, "password_changed": password_changed}),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;
@@ -1147,18 +1210,56 @@ async fn update_user(
             Json(json!({"error": "User not found"})),
         )
             .into_response(),
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Failed to update user"})),
-        )
-            .into_response(),
+        Err(error) if is_unique_violation(&error) => conflict("That username is already taken"),
+        Err(error) => {
+            tracing::error!(user_id = id, error = %error, "failed to update user");
+            bad_request("Failed to update user")
+        }
     }
+}
+
+/// Applies a user edit. A password change also signs the user out of every other session,
+/// in the same transaction, so a leaked or shared password stops working immediately.
+async fn update_user_record(
+    state: &AppState,
+    id: i32,
+    username: &str,
+    body: &UpdateUserBody,
+    password_hash: Option<String>,
+    current_session: Option<uuid::Uuid>,
+) -> Result<Option<User>, sqlx::Error> {
+    let mut tx = state.pool.begin().await?;
+    let password_changed = password_hash.is_some();
+
+    let updated = sqlx::query_as::<_, User>(
+        "UPDATE users
+         SET username = $1, tier_id = $2, is_admin = $3, can_upload_pools = $4,
+             password_hash = COALESCE($5, password_hash)
+         WHERE id = $6
+         RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
+    )
+    .bind(username)
+    .bind(body.tier_id)
+    .bind(body.is_admin)
+    .bind(body.can_upload_pools)
+    .bind(password_hash)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if updated.is_some() && password_changed {
+        auth::revoke_user_sessions(&mut *tx, id, current_session).await?;
+    }
+
+    tx.commit().await?;
+    Ok(updated)
 }
 
 async fn delete_user(
     State(state): State<AppState>,
     Path(id): Path<i32>,
     headers: HeaderMap,
+    client: security::ClientMeta,
     jar: CookieJar,
 ) -> impl IntoResponse {
     if !security::verify_csrf(&jar, &headers) {
@@ -1197,8 +1298,8 @@ async fn delete_user(
                     target_type: "user",
                     target_id: Some(user_id.to_string()),
                     metadata: json!({}),
-                    ip_address: Some(security::client_ip(&headers)),
-                    user_agent: security::user_agent(&headers),
+                    ip_address: Some(client.ip.clone()),
+                    user_agent: client.user_agent.clone(),
                 },
             )
             .await;

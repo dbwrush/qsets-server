@@ -62,6 +62,25 @@ pub fn can_delete_pool(actor: &Actor, pool_created_by: Option<i32>) -> bool {
     }
 }
 
+/// Checks a tier's proposed rank. `current_rank` is `None` when creating a tier.
+///
+/// Anonymous visitors are fixed at [`ANONYMOUS_TIER_RANK`], so the tier holding that rank is the
+/// public tier: moving it would hide public pools, and ranks below it would be readable by
+/// everyone while looking restricted.
+pub fn validate_tier_rank(current_rank: Option<i32>, new_rank: i32) -> Result<(), &'static str> {
+    if new_rank < ANONYMOUS_TIER_RANK {
+        return Err("Tier rank must not be negative");
+    }
+    if current_rank == Some(ANONYMOUS_TIER_RANK) && new_rank != ANONYMOUS_TIER_RANK {
+        return Err("The public tier must keep rank 0");
+    }
+    Ok(())
+}
+
+pub fn can_delete_tier(tier_rank: i32) -> bool {
+    tier_rank != ANONYMOUS_TIER_RANK
+}
+
 pub async fn load_actor(pool: &PgPool, jar: &CookieJar) -> Actor {
     let Some(user_id) = auth::get_user_id_from_jar(pool, jar).await else {
         return Actor::anonymous();
@@ -213,6 +232,22 @@ mod tests {
         let admin = actor(0, true, false);
         assert!(can_delete_pool(&admin, Some(2)));
         assert!(can_delete_pool(&admin, None));
+    }
+
+    #[test]
+    fn public_tier_rank_is_locked() {
+        assert!(validate_tier_rank(Some(0), 0).is_ok());
+        assert!(validate_tier_rank(Some(0), 3).is_err());
+        assert!(!can_delete_tier(0));
+        assert!(can_delete_tier(2));
+    }
+
+    #[test]
+    fn tier_ranks_cannot_go_below_public() {
+        assert!(validate_tier_rank(None, -1).is_err());
+        assert!(validate_tier_rank(Some(2), -1).is_err());
+        assert!(validate_tier_rank(None, 4).is_ok());
+        assert!(validate_tier_rank(Some(2), 5).is_ok());
     }
 
     #[test]

@@ -1,13 +1,21 @@
 use std::{
     collections::HashMap,
+    convert::Infallible,
+    net::SocketAddr,
     time::{Duration, Instant},
 };
 
-use axum::http::HeaderMap;
+use axum::{
+    async_trait,
+    extract::{ConnectInfo, FromRequestParts},
+    http::{request::Parts, HeaderMap},
+};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use once_cell::sync::Lazy;
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::sync::Mutex;
+
+use crate::state::AppState;
 
 const CSRF_COOKIE: &str = "qsets_csrf";
 const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
@@ -16,14 +24,56 @@ const LOGIN_MAX_ATTEMPTS: usize = 10;
 static LOGIN_ATTEMPTS: Lazy<Mutex<HashMap<String, Vec<Instant>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+/// Resolves the address used for throttling and audit logs.
+///
+/// `X-Forwarded-For` is client-controlled unless a trusted proxy overwrites it, so it is only
+/// consulted when `trust_proxy` is set. In that case the right-most entry is used: it is the one
+/// appended by the proxy directly in front of us, while anything to its left came from the client.
+pub fn resolve_client_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy {
+        let forwarded = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        if let Some(ip) = forwarded {
+            return ip.to_string();
+        }
+    }
+
+    peer.map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Request origin details recorded in audit logs and used as the login throttle key.
+#[derive(Debug, Clone)]
+pub struct ClientMeta {
+    pub ip: String,
+    pub user_agent: Option<String>,
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for ClientMeta {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| *addr);
+        Ok(Self {
+            ip: resolve_client_ip(&parts.headers, peer, state.trust_proxy),
+            user_agent: user_agent(&parts.headers),
+        })
+    }
 }
 
 pub fn user_agent(headers: &HeaderMap) -> Option<String> {
@@ -108,5 +158,30 @@ mod tests {
         headers.insert("x-csrf-token", "wrong".parse().unwrap());
         assert!(!verify_csrf(&jar, &headers));
         assert!(!verify_csrf(&CookieJar::new(), &headers));
+    }
+
+    fn forwarded(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn forwarded_header_is_ignored_unless_proxy_is_trusted() {
+        let peer: SocketAddr = "10.0.0.5:4000".parse().unwrap();
+        let headers = forwarded("203.0.113.9");
+        assert_eq!(resolve_client_ip(&headers, Some(peer), false), "10.0.0.5");
+        assert_eq!(resolve_client_ip(&headers, None, false), "unknown");
+    }
+
+    #[test]
+    fn trusted_proxy_uses_right_most_forwarded_entry() {
+        let peer: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        let headers = forwarded("1.2.3.4, 203.0.113.9");
+        assert_eq!(resolve_client_ip(&headers, Some(peer), true), "203.0.113.9");
+        assert_eq!(
+            resolve_client_ip(&HeaderMap::new(), Some(peer), true),
+            "127.0.0.1"
+        );
     }
 }
