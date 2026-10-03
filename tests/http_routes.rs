@@ -846,7 +846,10 @@ async fn every_page_renders_the_same_header_for_the_same_visitor(pool: PgPool) {
     let anonymous = header_html(&app, "/", None).await;
     assert_eq!(header_html(&app, "/login", None).await, anonymous);
     assert!(anonymous.contains(r#"href="/login""#));
-    assert!(!anonymous.contains("Logout"));
+    assert!(!anonymous.contains(r#"id="logout-link""#));
+    assert!(!anonymous.contains("user-menu"));
+    // Signed-out visitors still get a light/dark control.
+    assert!(anonymous.contains(r#"id="theme-button""#));
 
     let admin_header = header_html(&app, "/", Some(&admin_session)).await;
     for page in ["/login", "/account", "/admin"] {
@@ -858,9 +861,11 @@ async fn every_page_renders_the_same_header_for_the_same_visitor(pool: PgPool) {
     }
     for expected in [
         "the-admin",
+        r#"id="user-menu-button""#,
         r#"href="/account""#,
         r#"href="/admin""#,
-        "Logout",
+        r#"id="theme-toggle""#,
+        r#"id="logout-link""#,
     ] {
         assert!(admin_header.contains(expected), "missing {expected}");
     }

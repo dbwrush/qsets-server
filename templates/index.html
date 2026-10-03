@@ -3,17 +3,32 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>QSets — Bible Quiz Set Generator</title>
+  <title>QSets — Bible Question Set Generator</title>
+  <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body data-csrf="{{ csrf_token }}">
   {% include "_header.html" %}
 
   <main>
+    <section class="page-intro">
+      <p class="eyebrow">Bible question set generator</p>
+      <h1 class="page-title">Build question sets</h1>
+      <p class="lede">Pick a question pool, choose the passages in play, and generate sets ready to read aloud or print.</p>
+    </section>
+
+    <ol class="stepper" aria-label="Progress">
+      <li data-step="step-1" aria-current="step"><span class="stepper-num">1</span><span class="stepper-label">Pool</span></li>
+      <li data-step="step-2"><span class="stepper-num">2</span><span class="stepper-label">Passages</span></li>
+      <li data-step="step-3"><span class="stepper-num">3</span><span class="stepper-label">Options</span></li>
+      <li data-step="results"><span class="stepper-num">4</span><span class="stepper-label">Sets</span></li>
+    </ol>
+
     <div class="panel">
       <!-- Step 1: Pool Selection -->
       <div class="wizard-step active" id="step-1">
-        <h2>Select Question Pool</h2>
+        <h2>Choose a question pool</h2>
         <div id="pool-section">
           <p class="msg-info">Loading pools…</p>
         </div>
@@ -21,19 +36,19 @@
 
       <!-- Step 2: Book & Chapter Selection -->
       <div class="wizard-step" id="step-2">
-        <h2>Select Books &amp; Chapters</h2>
+        <h2>Choose books &amp; chapters</h2>
         <div id="bookSelection">
           <p class="msg-info">Select a pool first.</p>
         </div>
         <div class="wizard-nav">
           <button type="button" class="btn-ghost" id="backToStep1">Back</button>
-          <button type="button" class="btn-primary" id="nextToStep3">Next</button>
+          <button type="button" class="btn-primary" id="nextToStep3">Continue</button>
         </div>
       </div>
 
       <!-- Step 3: Generation Options -->
       <div class="wizard-step" id="step-3">
-        <h2>Generation Options</h2>
+        <h2>Set options</h2>
         <div class="options-grid">
           <div class="form-group">
             <label for="numSets">Number of Sets</label>
@@ -63,7 +78,7 @@
         </div>
         <div class="wizard-nav">
           <button type="button" class="btn-ghost" id="backToStep2">Back</button>
-          <button type="button" class="btn-primary" id="generateBtn">Generate</button>
+          <button type="button" class="btn-primary" id="generateBtn">Generate sets</button>
         </div>
         <div id="generateStatus"></div>
       </div>
@@ -71,33 +86,37 @@
       <!-- Step 4: Results -->
       <div class="wizard-step" id="results">
         <div class="results-header">
-          <h2>Generated Sets</h2>
+          <h2>Your sets</h2>
           <label class="toggle-answers">
-            <input type="checkbox" id="showAnswers" />
-            <span>Show Answers</span>
+            <input type="checkbox" id="showAnswers" role="switch" />
+            <span>Show answers</span>
           </label>
         </div>
-        <div id="setResults"></div>
-        <div class="download-buttons">
+        <div class="results-toolbar">
           <button id="downloadRTF" class="btn-download">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download RTF
           </button>
           <button id="downloadJSON" class="btn-download">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download QSET
           </button>
+          <button type="button" class="btn-download" id="printSets">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+            Print
+          </button>
         </div>
+        <div id="setResults"></div>
         <div class="wizard-nav">
-          <button type="button" class="btn-ghost" id="backToStep3">Back to Options</button>
-          <span></span>
+          <button type="button" class="btn-ghost" id="backToStep3">Back to options</button>
+          <button type="button" class="btn-ghost" id="startOver">Start over</button>
         </div>
       </div>
     </div>
   </main>
 
-  <footer class="footer">
-    Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank">Michael Parenti</a>
+  <footer class="site-footer">
+    <p>Created by <a href="https://dbwrush.com" target="_blank" rel="noopener">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank" rel="noopener">Michael Parenti</a></p>
   </footer>
 
   <script src="/static/header.js"></script>

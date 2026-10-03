@@ -25,17 +25,34 @@ let generatedRoundNames = [];
 let lastSelectedBookFilters = [];
 let generatedPool = null;
 
+// One-letter question type codes; shared by the on-screen sets and the RTF export.
+const TYPE_ABBREV = { "According-To": "A", General: "G", "In-What-Book-and-Chapter": "I", Quote: "Q", Reference: "R", Situation: "S", Context: "X", Verse: "V" };
+
+function typeCode(type) {
+  return TYPE_ABBREV[type] || "G";
+}
+
 // Wizard navigation
+const STEP_ORDER = ["step-1", "step-2", "step-3", "results"];
+
 function showStep(id) {
   document.querySelectorAll(".wizard-step").forEach(el => el.classList.remove("active"));
   const target = document.getElementById(id);
   if (target) target.classList.add("active");
+
+  // Mark earlier steps done and this one current in the progress indicator.
+  const current = STEP_ORDER.indexOf(id);
+  document.querySelectorAll(".stepper li").forEach(li => {
+    const index = STEP_ORDER.indexOf(li.dataset.step);
+    li.classList.toggle("done", index < current);
+    if (index === current) li.setAttribute("aria-current", "step");
+    else li.removeAttribute("aria-current");
+  });
 }
 
 // Init
 document.addEventListener("DOMContentLoaded", async () => {
-  await loadPools();
-
+  document.getElementById("printSets")?.addEventListener("click", () => window.print());
   document.getElementById("downloadRTF")?.addEventListener("click", downloadRTF);
   document.getElementById("downloadJSON")?.addEventListener("click", downloadJSON);
   document.getElementById("showAnswers")?.addEventListener("change", toggleAnswers);
@@ -44,6 +61,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("nextToStep3")?.addEventListener("click", () => showStep("step-3"));
   document.getElementById("backToStep2")?.addEventListener("click", () => showStep("step-2"));
   document.getElementById("backToStep3")?.addEventListener("click", () => showStep("step-3"));
+  document.getElementById("startOver")?.addEventListener("click", () => {
+    window.scrollTo({ top: 0 });
+    showStep("step-1");
+  });
+
+  await loadPools();
 });
 
 // ── Pool Selection (table) ──
@@ -217,35 +240,47 @@ function poolSourceLabel() {
 function displayResults(sets, prefix) {
   const container = document.getElementById("setResults");
   const source = poolSourceLabel();
-  const sourceHtml = source
-    ? `<p class="set-source">Source pool: ${escapeHtml(source)}</p>`
-    : "";
+  const passages = generateSectionTag(lastSelectedBookFilters);
   const html = sets.map((set, si) => {
     const label = `${prefix}${si + 1}`;
-    const qs = set.map((q, qi) => `
-      <div class="question-item">
-        <span class="question-num">${qi + 1}.</span>
+    const qs = set.map((q, qi) => {
+      const type = q.type || q.qtype || "General";
+      return `
+      <li class="question-item">
+        <span class="question-num">${qi + 1}</span>
+        <span class="question-type" title="${escapeHtml(type)}">${typeCode(type)}</span>
         <div class="question-text">
-          ${escapeHtml(q.question)}
-          <div class="question-answer">${escapeHtml(q.answer || "")} <span class="question-ref">(${escapeHtml(q.reference || "")})</span></div>
+          <p class="question-body">${escapeHtml(q.question)}</p>
+          <p class="question-answer">${escapeHtml(q.answer || "")} <span class="question-ref">${escapeHtml(q.reference || "")}</span></p>
         </div>
-        <span class="question-type">${escapeHtml(q.type || q.qtype || "")}</span>
-      </div>
-    `).join("");
-    return `<div class="set-heading"><h3>${escapeHtml(label)}</h3><span class="set-count">${set.length} questions</span></div>
-      <div class="question-set">${qs}</div>`;
+      </li>`;
+    }).join("");
+    return `<article class="question-set">
+        <header class="set-heading">
+          <h3>${escapeHtml(label)}</h3>
+          <span class="set-count">${set.length} questions</span>
+        </header>
+        <ol class="question-list">${qs}</ol>
+      </article>`;
   }).join("");
 
-  container.innerHTML = sourceHtml + html;
+  const legend = Object.entries(TYPE_ABBREV)
+    .map(([name, code]) => `<span><b>${code}</b> ${escapeHtml(name.replace(/-/g, " "))}</span>`)
+    .join("");
+  const sourceHtml = source
+    ? `<p class="set-source">${escapeHtml(passages || source)}</p>`
+    : "";
+  container.innerHTML = `${sourceHtml}<div class="type-legend" aria-label="Question type codes">${legend}</div>${html}`;
   showStep("results");
 
   const cb = document.getElementById("showAnswers");
   if (cb) cb.checked = false;
+  container.classList.remove("answers-visible");
 }
 
 function toggleAnswers() {
   const show = document.getElementById("showAnswers")?.checked;
-  document.querySelectorAll(".question-answer").forEach(el => el.classList.toggle("visible", show));
+  document.getElementById("setResults")?.classList.toggle("answers-visible", show);
 }
 
 // ── Downloads ──
@@ -288,13 +323,12 @@ function generateSectionTag(filters) {
 }
 
 function buildRtf(roundNames, sets, sectionTag) {
-  const abbrev = { "According-To": "A", General: "G", "In-What-Book-and-Chapter": "I", Quote: "Q", Reference: "R", Situation: "S", Context: "X", Verse: "V" };
   const header = `{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0\\fswiss Arial;}{\\f1\\froman Times New Roman;}}{\\header \\pard\\plain\\qr \\fs16 ${escapeRtf(sectionTag)}\\par}{\\footer \\pard\\plain\\ql \\fs14 ${escapeRtf(sectionTag)}\\par}\\viewkind4\\uc1\\pard\\f0\\fs22 `;
   const body = sets.map((set, si) => {
     const name = roundNames[si] || `SET #${si + 1}`;
     const h = `\\pard\\qc\\b\\fs28 ${escapeRtf(name)}\\b0\\fs22\\par\\par`;
     const qs = set.map((q, qi) => {
-      const t = abbrev[q.type || q.qtype || "General"] || "G";
+      const t = typeCode(q.type || q.qtype || "General");
       return `\\pard\\fi-360\\li360\\fs22 ${t}\\tab ${qi + 1}. ${escapeRtf(q.question || "")}\\par\\tab A. ${escapeRtf(q.answer || "")} (${escapeRtf(q.reference || "")})\\par\\par`;
     }).join("");
     return `${h}${qs}`;

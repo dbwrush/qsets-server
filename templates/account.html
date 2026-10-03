@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Account - QSets</title>
+  <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body data-csrf="{{ csrf_token }}">
@@ -11,7 +13,8 @@
 
   <main>
     <div class="panel login-container">
-      <h2>Change Password</h2>
+      <h2>Change password</h2>
+      <p class="card-sub">Signed in as <strong>{{ header.username }}</strong>.</p>
       <form id="password-form" class="login-form">
         <div class="form-group">
           <label for="current-password">Current password</label>
@@ -25,15 +28,15 @@
           <label for="confirm-password">Confirm new password</label>
           <input type="password" id="confirm-password" name="confirm_password" autocomplete="new-password" minlength="8" required />
         </div>
-        <button type="submit" class="login-button">Change Password</button>
+        <button type="submit" class="btn-primary login-button">Change password</button>
         <div id="password-status" class="login-status"></div>
         <small class="form-hint">Changing your password signs you out everywhere else.</small>
       </form>
     </div>
   </main>
 
-  <footer class="footer">
-    Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank">Michael Parenti</a>
+  <footer class="site-footer">
+    <p>Created by <a href="https://dbwrush.com" target="_blank" rel="noopener">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank" rel="noopener">Michael Parenti</a></p>
   </footer>
 
   <script src="/static/header.js"></script>

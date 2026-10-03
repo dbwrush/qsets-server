@@ -17,6 +17,8 @@ use crate::{
 struct Header {
     is_authenticated: bool,
     username: String,
+    /// First letter of the username, shown in the menu button's avatar.
+    initial: String,
     can_access_admin: bool,
 }
 
@@ -25,6 +27,10 @@ impl Header {
         Self {
             is_authenticated: user.is_some(),
             username: user.map(|u| u.username.clone()).unwrap_or_default(),
+            initial: user
+                .and_then(|u| u.username.chars().next())
+                .map(|c| c.to_uppercase().collect())
+                .unwrap_or_default(),
             can_access_admin: user.is_some_and(|u| u.is_admin || u.can_upload_pools),
         }
     }
