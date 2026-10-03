@@ -5,6 +5,7 @@ use argon2::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 pub const SESSION_COOKIE: &str = "qsets_session";
@@ -35,6 +36,59 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// Hash checked when a username does not exist, made with the same parameters as real hashes so
+/// both paths take as long and response timing does not reveal which usernames exist.
+static DUMMY_PASSWORD_HASH: LazyLock<String> =
+    LazyLock::new(|| hash_password("qsets-dummy-password").expect("hashing a constant succeeds"));
+
+/// Computes the dummy hash up front so the first unknown-user login is not measurably slower.
+pub fn prepare_dummy_hash() {
+    LazyLock::force(&DUMMY_PASSWORD_HASH);
+}
+
+/// Checks a password off the async workers, since Argon2 is deliberately slow. `hash` is `None`
+/// for an unknown user, which still pays for one verification and then fails.
+pub async fn verify_password_blocking(password: String, hash: Option<String>) -> bool {
+    tokio::task::spawn_blocking(move || match hash {
+        Some(hash) => verify_password(&password, &hash),
+        None => {
+            verify_password(&password, &DUMMY_PASSWORD_HASH);
+            false
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Hashes off the async workers; see [`verify_password_blocking`].
+pub async fn hash_password_blocking(password: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| format!("password hashing task failed: {e}"))?
+}
+
+/// Stores a new password hash and signs the user out of every session except `keep`, in one
+/// transaction, so a leaked or shared password stops working immediately.
+pub async fn set_password(
+    pool: &PgPool,
+    user_id: i32,
+    password_hash: &str,
+    keep: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if updated > 0 {
+        revoke_user_sessions(&mut *tx, user_id, keep).await?;
+    }
+    tx.commit().await?;
+    Ok(updated > 0)
 }
 
 pub async fn create_default_admin(
@@ -156,6 +210,14 @@ pub async fn get_user_id_from_jar(pool: &PgPool, jar: &CookieJar) -> Option<i32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unknown_users_never_verify() {
+        assert!(!verify_password_blocking("qsets-dummy-password".into(), None).await);
+        let hash = hash_password("real password").unwrap();
+        assert!(verify_password_blocking("real password".into(), Some(hash.clone())).await);
+        assert!(!verify_password_blocking("wrong".into(), Some(hash)).await);
+    }
 
     #[test]
     fn password_policy_enforces_minimum_length() {

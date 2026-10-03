@@ -15,6 +15,9 @@ async function api(url, options = {}) {
   return data;
 }
 
+// Matches MAX_SETS_PER_REQUEST on the server and the numSets input's max.
+const MAX_SETS = 20;
+
 // State
 let selectedPoolId = null;
 let availablePools = [];
@@ -51,6 +54,7 @@ function initializeHeader() {
   if (window.QSETS_IS_AUTHENTICATED) {
     el.innerHTML = `
       <span class="user-info">${escapeHtml(window.QSETS_USERNAME)}</span>
+      <a href="/account">Account</a>
       <a href="#" id="logout-link">Logout</a>
       <a href="/admin">Admin</a>
     `;
@@ -187,10 +191,14 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
   lastSelectedBookFilters = books;
   if (books.length === 0) { alert("Select at least one book."); return; }
 
-  const numSets = parseInt(document.getElementById("numSets").value) || 1;
+  const numSets = Math.min(MAX_SETS, Math.max(1, parseInt(document.getElementById("numSets").value) || 1));
   const useSituation = document.querySelector('input[name="questionType"]:checked')?.value === "situation";
   const seedInput = document.getElementById("seedInput").value;
-  const seed = seedInput ? parseInt(seedInput) : null;
+  const seed = seedInput ? Number(seedInput) : null;
+  if (seed !== null && !(Number.isSafeInteger(seed) && seed >= 0)) {
+    alert("Seed must be a whole number of 0 or more.");
+    return;
+  }
 
   const btn = document.getElementById("generateBtn");
   const status = document.getElementById("generateStatus");
@@ -198,27 +206,25 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
   status.textContent = "Generating…";
 
   try {
-    const sets = [];
-    const names = [];
     const prefix = document.getElementById("setNamePrefix")?.value || "SET #";
 
-    for (let i = 0; i < numSets; i++) {
-      const data = await api("/api/generate", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pool_id: selectedPoolId,
-          question_type: "standard",
-          count: 20,
-          situation: useSituation,
-          seed: seed == null ? null : seed + i,
-          books,
-        }),
-      });
-      sets.push(data.questions || []);
-      names.push(`${prefix}${i + 1}`);
-      if (data.pool) generatedPool = data.pool;
-    }
+    // One request for every set; the server derives set i's seed as seed + i.
+    const data = await api("/api/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pool_id: selectedPoolId,
+        question_type: "standard",
+        count: 20,
+        situation: useSituation,
+        seed,
+        books,
+        sets: numSets,
+      }),
+    });
+    const sets = data.sets || [];
+    const names = sets.map((_, i) => `${prefix}${i + 1}`);
+    if (data.pool) generatedPool = data.pool;
 
     generatedSets = sets;
     generatedRoundNames = names;
@@ -271,8 +277,23 @@ function toggleAnswers() {
 }
 
 // ── Downloads ──
+// RTF is read as 8-bit cp1252, so anything outside ASCII (curly quotes, dashes, accents) must be
+// written as \uN with N the signed 16-bit UTF-16 code unit. Astral characters become two \u
+// escapes for their surrogate pair, which RTF readers recombine. The "?" is the fallback that
+// \uc1 in the header tells readers to skip.
 function escapeRtf(text) {
-  return String(text).replace(/\\/g, "\\\\").replace(/{/g, "\\{").replace(/}/g, "\\}").replace(/\n/g, "\\line ");
+  let out = "";
+  const s = String(text);
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = s.charCodeAt(i);
+    if (ch === "\\" || ch === "{" || ch === "}") out += "\\" + ch;
+    else if (ch === "\n") out += "\\line ";
+    else if (ch === "\r") continue;
+    else if (code > 127) out += `\\u${code > 32767 ? code - 65536 : code}?`;
+    else out += ch;
+  }
+  return out;
 }
 
 function triggerDownload(filename, content, mimeType) {

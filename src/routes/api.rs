@@ -1,28 +1,36 @@
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::common::{
+    db_error, is_foreign_key_violation, is_unique_violation, require_csrf, require_user, Admin,
+    ApiError, ApiResult,
+};
 use crate::{
     models::{QuestionPool, Tier, User},
-    services::{audit, auth, authz, generator, security},
+    services::{
+        audit, auth,
+        authz::{self, Actor, PoolAccess},
+        generator,
+        security::ClientMeta,
+    },
     state::AppState,
 };
 
 const MAX_POOL_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-pub struct LoginRequest {
-    username: String,
-    password: String,
-}
+/// Most sets one generate request may ask for; matches the limit in the generator form.
+const MAX_SETS_PER_REQUEST: usize = 20;
+const DEFAULT_AUDIT_PAGE: i64 = 50;
+const MAX_AUDIT_PAGE: i64 = 200;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -30,8 +38,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
+        .route("/api/me/password", post(change_own_password))
         .route("/api/pools", get(list_pools).post(upload_pool))
-        .route("/api/pools/:id", axum::routing::delete(delete_pool))
+        .route("/api/pools/:id", put(replace_pool).delete(delete_pool))
         .route("/api/pools/:id/books", get(pool_books))
         .route("/api/tiers", get(list_assignable_tiers))
         .route("/api/generate", post(generate))
@@ -39,274 +48,165 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/tiers/:id", put(update_tier).delete(delete_tier))
         .route("/api/admin/users", get(list_users).post(create_user))
         .route("/api/admin/users/:id", put(update_user).delete(delete_user))
+        .route("/api/admin/audit", get(list_audit))
+        .route_layer(middleware::from_fn(require_csrf))
         .layer(DefaultBodyLimit::max(MAX_POOL_UPLOAD_BYTES))
         .with_state(state)
 }
 
-async fn require_admin(state: &AppState, jar: &CookieJar) -> Result<i32, Box<Response>> {
-    let Some(user_id) = auth::get_user_id_from_jar(&state.pool, jar).await else {
-        return Err(Box::new(
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Not authenticated"})),
-            )
-                .into_response(),
-        ));
-    };
-
-    let is_admin = sqlx::query_scalar::<_, bool>("SELECT is_admin FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(false);
-
-    if !is_admin {
-        return Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "Admin required"})),
-            )
-                .into_response(),
-        ));
-    }
-
-    Ok(user_id)
+fn ok(body: Value) -> ApiResult {
+    Ok(Json(body).into_response())
 }
 
-fn forbidden(message: &str) -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
+fn pool_not_found() -> ApiError {
+    ApiError::not_found("Pool not found")
 }
 
-fn bad_request(message: &str) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+fn tier_not_found() -> ApiError {
+    ApiError::not_found("Tier not found")
 }
 
-fn conflict(message: &str) -> Response {
-    (StatusCode::CONFLICT, Json(json!({ "error": message }))).into_response()
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.is_unique_violation())
-}
-
-fn tier_not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({"error": "Tier not found"})),
-    )
-        .into_response()
-}
-
-fn pool_not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({"error": "Pool not found"})),
-    )
-        .into_response()
-}
-
-/// Single gate for reading a pool: resolves the caller and rejects pools above their tier.
-async fn authorize_pool_access(
-    state: &AppState,
-    jar: &CookieJar,
-    pool_id: i32,
-) -> Result<(authz::Actor, authz::PoolAccess), Box<Response>> {
-    let actor = authz::load_actor(&state.pool, jar).await;
-
-    let pool = match authz::load_pool_access(&state.pool, pool_id).await {
-        Ok(Some(pool)) => pool,
-        Ok(None) => return Err(Box::new(pool_not_found())),
-        Err(error) => {
-            tracing::error!(pool_id, error = %error, "failed to load pool for authorization");
-            return Err(Box::new(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "Failed to load pool"})),
-                )
-                    .into_response(),
-            ));
-        }
-    };
-
-    if !authz::can_access_pool(&actor, pool.tier_rank) {
-        return Err(Box::new(forbidden("Tier access denied")));
-    }
-
-    Ok((actor, pool))
-}
-
-/// Tiers the caller is permitted to assign when uploading a pool.
-async fn list_assignable_tiers(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    let actor = authz::load_actor(&state.pool, &jar).await;
-
-    let tiers = sqlx::query_as::<_, Tier>(
-        "SELECT id, name, rank FROM tiers WHERE $1 OR rank <= $2 ORDER BY rank ASC",
-    )
-    .bind(actor.is_admin)
-    .bind(actor.tier_rank)
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "tiers": tiers,
-            "can_upload_pools": authz::can_upload(&actor),
-        })),
-    )
-        .into_response()
+fn user_not_found() -> ApiError {
+    ApiError::not_found("User not found")
 }
 
 async fn health() -> impl IntoResponse {
     Json(json!({"ok": true}))
 }
 
+async fn load_pool(state: &AppState, pool_id: i32) -> ApiResult<PoolAccess> {
+    authz::load_pool_access(&state.pool, pool_id)
+        .await
+        .map_err(db_error("Failed to load pool"))?
+        .ok_or_else(pool_not_found)
+}
+
+/// Single gate for reading a pool: rejects pools above the caller's tier.
+async fn authorize_pool_access(
+    state: &AppState,
+    actor: &Actor,
+    pool_id: i32,
+) -> ApiResult<PoolAccess> {
+    let pool = load_pool(state, pool_id).await?;
+    if !authz::can_access_pool(actor, pool.tier_rank) {
+        return Err(ApiError::forbidden("Tier access denied"));
+    }
+    Ok(pool)
+}
+
+/// The pool's parsed questions, from the cache when it holds this version of the pool.
 async fn parsed_pool(
     state: &AppState,
-    pool_id: i32,
-) -> Option<Arc<Vec<generator::QuestionRecord>>> {
-    if let Some(cached) = state.parsed_pools.read().await.get(pool_id) {
-        return Some(cached);
+    pool: &PoolAccess,
+) -> ApiResult<Arc<Vec<generator::QuestionRecord>>> {
+    if let Some(cached) = state
+        .parsed_pools
+        .read()
+        .await
+        .get(pool.id, pool.updated_at)
+    {
+        return Ok(cached);
     }
 
     // Load and parse without holding the lock so cache hits for other pools are never blocked.
     // Concurrent misses for the same pool may both parse it; the second insert is harmless.
-    let csv_text =
-        sqlx::query_scalar::<_, String>("SELECT csv_text FROM question_pools WHERE id = $1")
-            .bind(pool_id)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten()?;
+    let (csv_text, version) = sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
+        "SELECT csv_text, updated_at FROM question_pools WHERE id = $1",
+    )
+    .bind(pool.id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(db_error("Failed to load pool"))?
+    .ok_or_else(pool_not_found)?;
     let parsed = Arc::new(generator::parse_csv(&csv_text));
     state
         .parsed_pools
         .write()
         .await
-        .insert(pool_id, parsed.clone());
-    Some(parsed)
+        .insert(pool.id, version, parsed.clone());
+    Ok(parsed)
+}
+
+// ── Sessions ──
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    username: String,
+    password: String,
 }
 
 async fn login(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
+    client: ClientMeta,
     jar: CookieJar,
     Json(payload): Json<LoginRequest>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let key = format!("{}:{}", payload.username, client.ip);
-    if !security::allow_login_attempt(&key).await {
-        return (
+) -> ApiResult {
+    let throttle = &state.login_throttle;
+    if !throttle.allows(&payload.username, &client.ip) {
+        return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({"error": "Too many login attempts"})),
-        )
-            .into_response();
+            "Too many login attempts",
+        ));
     }
 
-    let row = sqlx::query_as::<_, User>(
+    let user = sqlx::query_as::<_, User>(
         "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE username = $1",
     )
     .bind(&payload.username)
     .fetch_optional(&state.pool)
-    .await;
+    .await
+    .map_err(db_error("Failed to look up user"))?;
 
-    let Ok(Some(user)) = row else {
-        security::record_login_attempt(&key).await;
-        audit::log_event(
-            &state.pool,
-            audit::AuditEvent {
-                actor_user_id: None,
-                action: "login.failed",
-                target_type: "user",
-                target_id: Some(payload.username),
-                metadata: json!({"reason": "user_not_found"}),
-                ip_address: Some(client.ip.clone()),
-                user_agent: client.user_agent.clone(),
-            },
-        )
-        .await;
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Invalid credentials"})),
-        )
-            .into_response();
-    };
+    // Unknown usernames still run a hash check so timing does not reveal which names exist.
+    let hash = user.as_ref().map(|u| u.password_hash.clone());
+    let verified = auth::verify_password_blocking(payload.password, hash).await;
 
-    if !auth::verify_password(&payload.password, &user.password_hash) {
-        security::record_login_attempt(&key).await;
-        audit::log_event(
-            &state.pool,
-            audit::AuditEvent {
-                actor_user_id: Some(user.id),
-                action: "login.failed",
-                target_type: "user",
-                target_id: Some(user.id.to_string()),
-                metadata: json!({"reason": "invalid_password"}),
-                ip_address: Some(client.ip.clone()),
-                user_agent: client.user_agent.clone(),
-            },
-        )
-        .await;
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Invalid credentials"})),
-        )
-            .into_response();
-    }
-
-    security::clear_login_attempts(&key).await;
-    let token = match auth::create_session(&state.pool, user.id).await {
-        Ok(t) => t,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to create session"})),
+    let user = match user {
+        Some(user) if verified => user,
+        user => {
+            throttle.record_failure(&payload.username, &client.ip);
+            let (actor, target, reason) = match &user {
+                Some(u) => (Some(u.id), u.id.to_string(), "invalid_password"),
+                None => (None, payload.username.clone(), "user_not_found"),
+            };
+            audit::record(
+                &state.pool,
+                &client,
+                actor,
+                "login.failed",
+                "user",
+                target,
+                json!({"reason": reason}),
             )
-                .into_response()
+            .await;
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
+            ));
         }
     };
 
-    audit::log_event(
+    throttle.record_success(&payload.username, &client.ip);
+    let token = auth::create_session(&state.pool, user.id)
+        .await
+        .map_err(|_| ApiError::internal("Failed to create session"))?;
+
+    audit::record(
         &state.pool,
-        audit::AuditEvent {
-            actor_user_id: Some(user.id),
-            action: "login.success",
-            target_type: "user",
-            target_id: Some(user.id.to_string()),
-            metadata: json!({}),
-            ip_address: Some(client.ip.clone()),
-            user_agent: client.user_agent.clone(),
-        },
+        &client,
+        Some(user.id),
+        "login.success",
+        "user",
+        user.id,
+        json!({}),
     )
     .await;
 
     let jar = auth::add_session_cookie(jar, token);
-    (jar, Json(json!({"message": "Logged in"}))).into_response()
+    Ok((jar, Json(json!({"message": "Logged in"}))).into_response())
 }
 
-async fn logout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
+async fn logout(State(state): State<AppState>, client: ClientMeta, jar: CookieJar) -> Response {
     let user_id = auth::get_user_id_from_jar(&state.pool, &jar).await;
 
     if let Some(token) = jar.get(auth::SESSION_COOKIE).map(|c| c.value().to_string()) {
@@ -314,17 +214,14 @@ async fn logout(
     }
 
     if let Some(actor) = user_id {
-        audit::log_event(
+        audit::record(
             &state.pool,
-            audit::AuditEvent {
-                actor_user_id: Some(actor),
-                action: "logout",
-                target_type: "user",
-                target_id: Some(actor.to_string()),
-                metadata: json!({}),
-                ip_address: Some(client.ip.clone()),
-                user_agent: client.user_agent.clone(),
-            },
+            &client,
+            Some(actor),
+            "logout",
+            "user",
+            actor,
+            json!({}),
         )
         .await;
     }
@@ -333,47 +230,134 @@ async fn logout(
     (jar, Json(json!({"message": "Logged out"}))).into_response()
 }
 
-async fn me(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    let Some(user_id) = auth::get_user_id_from_jar(&state.pool, &jar).await else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Not authenticated"})),
-        )
-            .into_response();
-    };
-
+async fn me(State(state): State<AppState>, actor: Actor) -> ApiResult {
+    let user_id = require_user(&actor)?;
     let user = sqlx::query_as::<_, User>(
         "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE id = $1",
     )
     .bind(user_id)
     .fetch_one(&state.pool)
-    .await;
+    .await
+    .map_err(db_error("Lookup failed"))?;
 
-    match user {
-        Ok(u) => (
-            StatusCode::OK,
-            Json(json!({
-                "id": u.id,
-                "username": u.username,
-                "is_admin": u.is_admin,
-                "can_upload_pools": u.can_upload_pools,
-                "tier_id": u.tier_id,
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Lookup failed"})),
-        )
-            .into_response(),
-    }
+    ok(json!({
+        "id": user.id,
+        "username": user.username,
+        "is_admin": user.is_admin,
+        "can_upload_pools": user.can_upload_pools,
+        "tier_id": user.tier_id,
+    }))
 }
 
-async fn list_pools(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    let actor = authz::load_actor(&state.pool, &jar).await;
+#[derive(Debug, Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
 
-    let pools = sqlx::query_as::<_, (i32, String, i32, String, i32, Option<i32>)>(
-        "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank, qp.created_by
+/// Lets any signed-in user change their own password. The current password is required, and
+/// wrong guesses count against the login throttle, so a stolen session cannot be used to guess
+/// it or to lock the owner out of their account without it.
+async fn change_own_password(
+    State(state): State<AppState>,
+    client: ClientMeta,
+    actor: Actor,
+    jar: CookieJar,
+    Json(body): Json<ChangePasswordBody>,
+) -> ApiResult {
+    let user_id = require_user(&actor)?;
+    auth::validate_password(&body.new_password).map_err(ApiError::bad_request)?;
+
+    let (username, current_hash) = sqlx::query_as::<_, (String, String)>(
+        "SELECT username, password_hash FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(db_error("Failed to look up user"))?
+    .ok_or_else(ApiError::unauthorized)?;
+
+    let throttle = &state.login_throttle;
+    if !throttle.allows(&username, &client.ip) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts; try again later",
+        ));
+    }
+    if !auth::verify_password_blocking(body.current_password, Some(current_hash)).await {
+        throttle.record_failure(&username, &client.ip);
+        audit::record(
+            &state.pool,
+            &client,
+            Some(user_id),
+            "password_change.failed",
+            "user",
+            user_id,
+            json!({"reason": "invalid_password"}),
+        )
+        .await;
+        return Err(ApiError::forbidden("Current password is incorrect"));
+    }
+    throttle.record_success(&username, &client.ip);
+
+    let new_hash = auth::hash_password_blocking(body.new_password)
+        .await
+        .map_err(|_| ApiError::internal("Failed to change password"))?;
+    let changed = auth::set_password(&state.pool, user_id, &new_hash, auth::session_token(&jar))
+        .await
+        .map_err(db_error("Failed to change password"))?;
+    if !changed {
+        return Err(user_not_found());
+    }
+
+    audit::record(
+        &state.pool,
+        &client,
+        Some(user_id),
+        "user.password_changed",
+        "user",
+        user_id,
+        json!({"self_service": true}),
+    )
+    .await;
+
+    ok(json!({"message": "Password changed"}))
+}
+
+// ── Pools ──
+
+/// Tiers the caller is permitted to assign when uploading a pool.
+async fn list_assignable_tiers(State(state): State<AppState>, actor: Actor) -> ApiResult {
+    let tiers = sqlx::query_as::<_, Tier>(
+        "SELECT id, name, rank FROM tiers WHERE $1 OR rank <= $2 ORDER BY rank ASC",
+    )
+    .bind(actor.is_admin)
+    .bind(actor.tier_rank)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(db_error("Failed to load tiers"))?;
+
+    ok(json!({
+        "tiers": tiers,
+        "can_upload_pools": authz::can_upload(&actor),
+    }))
+}
+
+async fn list_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
+    #[derive(sqlx::FromRow)]
+    struct PoolRow {
+        id: i32,
+        name: String,
+        tier_id: i32,
+        tier_name: String,
+        tier_rank: i32,
+        created_by: Option<i32>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let pools = sqlx::query_as::<_, PoolRow>(
+        "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank,
+                qp.created_by, qp.updated_at
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
          WHERE $1 OR t.rank <= $2
@@ -383,274 +367,251 @@ async fn list_pools(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     .bind(actor.tier_rank)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    .map_err(db_error("Failed to load pools"))?;
 
     let lightweight: Vec<_> = pools
         .into_iter()
-        .map(|(id, name, tier_id, tier_name, tier_rank, created_by)| {
+        .map(|p| {
             json!({
-                "id": id,
-                "name": name,
-                "tier_id": tier_id,
-                "tier_name": tier_name,
-                "tier_rank": tier_rank,
-                "can_delete": authz::can_delete_pool(&actor, created_by),
+                "id": p.id,
+                "name": p.name,
+                "tier_id": p.tier_id,
+                "tier_name": p.tier_name,
+                "tier_rank": p.tier_rank,
+                "updated_at": p.updated_at,
+                "can_manage": authz::can_manage_pool(&actor, p.created_by, p.tier_rank),
             })
         })
         .collect();
 
-    (StatusCode::OK, Json(json!({"pools": lightweight}))).into_response()
+    ok(json!({"pools": lightweight}))
+}
+
+#[derive(Default)]
+struct PoolForm {
+    name: Option<String>,
+    tier_id: Option<i32>,
+    csv: Option<String>,
+}
+
+async fn read_pool_form(mut multipart: Multipart) -> ApiResult<PoolForm> {
+    let mut form = PoolForm::default();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::new(e.status(), e.body_text()))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        let text = field
+            .text()
+            .await
+            .map_err(|e| ApiError::new(e.status(), e.body_text()))?;
+        match name.as_str() {
+            "name" => form.name = Some(text),
+            "tier_id" => form.tier_id = text.trim().parse().ok(),
+            "file" => form.csv = Some(text),
+            _ => {}
+        }
+    }
+    Ok(form)
+}
+
+fn validate_pool_csv(csv: &str) -> ApiResult<generator::CsvValidation> {
+    let validation = generator::validate_csv(csv);
+    if !validation.errors.is_empty() {
+        return Err(ApiError::bad_request(validation.errors.join("; "))
+            .with_details(json!({"validation": validation})));
+    }
+    Ok(validation)
+}
+
+fn validation_summary(validation: &generator::CsvValidation) -> Value {
+    json!({
+        "valid_count": validation.valid_count,
+        "skipped_count": validation.skipped_count,
+        "warnings": validation.warnings,
+    })
 }
 
 async fn upload_pool(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
-    mut multipart: Multipart,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let actor = authz::load_actor(&state.pool, &jar).await;
+    client: ClientMeta,
+    actor: Actor,
+    multipart: Multipart,
+) -> ApiResult {
     if !authz::can_upload(&actor) {
-        return forbidden("You do not have permission to upload question pools");
+        return Err(ApiError::forbidden(
+            "You do not have permission to upload question pools",
+        ));
     }
-    let Some(user_id) = actor.user_id else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Not authenticated"})),
-        )
-            .into_response();
+    let user_id = require_user(&actor)?;
+
+    let form = read_pool_form(multipart).await?;
+    let (Some(name), Some(tier), Some(csv)) = (form.name, form.tier_id, form.csv) else {
+        return Err(ApiError::bad_request("Missing fields"));
     };
-
-    let mut pool_name: Option<String> = None;
-    let mut tier_id: Option<i32> = None;
-    let mut csv_data: Option<String> = None;
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        match field.name().unwrap_or_default() {
-            "name" => {
-                pool_name = field.text().await.ok();
-            }
-            "tier_id" => {
-                tier_id = field.text().await.ok().and_then(|v| v.parse::<i32>().ok());
-            }
-            "file" => {
-                csv_data = field.text().await.ok();
-            }
-            _ => {}
-        }
-    }
-
-    let (Some(name), Some(tier), Some(csv)) = (pool_name, tier_id, csv_data) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Missing fields"})),
-        )
-            .into_response();
-    };
-    let name = name.trim().to_string();
+    let name = name.trim();
     if name.is_empty() {
-        return bad_request("Pool name must not be empty");
+        return Err(ApiError::bad_request("Pool name must not be empty"));
     }
 
     // The requested tier is never trusted from the client; re-check it against the uploader.
-    let requested_tier_rank = match authz::tier_rank(&state.pool, tier).await {
-        Ok(Some(rank)) => rank,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Unknown tier"})),
-            )
-                .into_response()
-        }
-        Err(error) => {
-            tracing::error!(tier_id = tier, error = %error, "failed to load tier for upload");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to validate tier"})),
-            )
-                .into_response();
-        }
-    };
-
+    let requested_tier_rank = authz::tier_rank(&state.pool, tier)
+        .await
+        .map_err(db_error("Failed to validate tier"))?
+        .ok_or_else(|| ApiError::bad_request("Unknown tier"))?;
     if !authz::can_assign_pool_tier(&actor, requested_tier_rank) {
-        return forbidden("You cannot create a pool above your own tier");
+        return Err(ApiError::forbidden(
+            "You cannot create a pool above your own tier",
+        ));
     }
 
-    // Validate the CSV before storing
-    let validation = generator::validate_csv(&csv);
-    if !validation.errors.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": validation.errors.join("; "),
-                "validation": validation,
-            })),
-        )
-            .into_response();
-    }
+    let validation = validate_pool_csv(&csv)?;
 
-    let inserted = sqlx::query_as::<_, QuestionPool>(
+    let pool = sqlx::query_as::<_, QuestionPool>(
         "INSERT INTO question_pools (name, tier_id, csv_text, created_by)
             VALUES ($1, $2, $3, $4)
             RETURNING id, name, tier_id, csv_text, created_by, created_at, updated_at",
     )
-    .bind(&name)
+    .bind(name)
     .bind(tier)
     .bind(&csv)
     .bind(user_id)
     .fetch_one(&state.pool)
+    .await
+    .map_err(|error| {
+        if is_unique_violation(&error) {
+            ApiError::conflict(
+                "A pool with that name already exists; replace it or choose another name",
+            )
+        } else {
+            db_error("Insert failed")(error)
+        }
+    })?;
+
+    audit::record(
+        &state.pool,
+        &client,
+        Some(user_id),
+        "pool.uploaded",
+        "question_pool",
+        pool.id,
+        json!({"name": pool.name, "tier_id": pool.tier_id}),
+    )
     .await;
 
-    match inserted {
-        Ok(pool) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(user_id),
-                    action: "pool.uploaded",
-                    target_type: "question_pool",
-                    target_id: Some(pool.id.to_string()),
-                    metadata: json!({"name": pool.name, "tier_id": pool.tier_id}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
+    ok(json!({
+        "id": pool.id,
+        "name": pool.name,
+        "tier_id": pool.tier_id,
+        "validation": validation_summary(&validation),
+    }))
+}
 
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "id": pool.id,
-                    "name": pool.name,
-                    "tier_id": pool.tier_id,
-                    "validation": {
-                        "valid_count": validation.valid_count,
-                        "skipped_count": validation.skipped_count,
-                        "warnings": validation.warnings
-                    }
-                })),
-            )
-                .into_response()
-        }
-        Err(error) if is_unique_violation(&error) => {
-            conflict("A pool with that name already exists; delete it first or choose another name")
-        }
-        Err(error) => {
-            tracing::error!(error = %error, "failed to insert pool");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Insert failed"})),
-            )
-                .into_response()
-        }
+/// Swaps a pool's CSV in place, keeping its id, name and tier.
+async fn replace_pool(
+    State(state): State<AppState>,
+    client: ClientMeta,
+    actor: Actor,
+    Path(id): Path<i32>,
+    multipart: Multipart,
+) -> ApiResult {
+    let user_id = require_user(&actor)?;
+    let pool = load_pool(&state, id).await?;
+    if !authz::can_manage_pool(&actor, pool.created_by, pool.tier_rank) {
+        return Err(ApiError::forbidden("You cannot replace this pool"));
     }
+
+    let csv = read_pool_form(multipart)
+        .await?
+        .csv
+        .ok_or_else(|| ApiError::bad_request("Missing file"))?;
+    let validation = validate_pool_csv(&csv)?;
+
+    sqlx::query_scalar::<_, i32>(
+        "UPDATE question_pools SET csv_text = $1, updated_at = NOW() WHERE id = $2 RETURNING id",
+    )
+    .bind(&csv)
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(db_error("Failed to replace pool"))?
+    .ok_or_else(pool_not_found)?;
+    // The new version already misses the cache; dropping the old entry just frees it sooner.
+    state.parsed_pools.write().await.remove(id);
+
+    audit::record(
+        &state.pool,
+        &client,
+        Some(user_id),
+        "pool.replaced",
+        "question_pool",
+        id,
+        json!({
+            "name": pool.name,
+            "valid_count": validation.valid_count,
+            "skipped_count": validation.skipped_count,
+        }),
+    )
+    .await;
+
+    ok(json!({
+        "id": pool.id,
+        "name": pool.name,
+        "tier_id": pool.tier_id,
+        "validation": validation_summary(&validation),
+    }))
 }
 
 async fn delete_pool(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
+    client: ClientMeta,
+    actor: Actor,
     Path(id): Path<i32>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
+) -> ApiResult {
+    let pool = load_pool(&state, id).await?;
+    if !authz::can_manage_pool(&actor, pool.created_by, pool.tier_rank) {
+        return Err(ApiError::forbidden("You cannot delete this pool"));
     }
 
-    let actor = authz::load_actor(&state.pool, &jar).await;
-    let Some(owner) =
-        sqlx::query_scalar::<_, Option<i32>>("SELECT created_by FROM question_pools WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or(None)
-    else {
-        return pool_not_found();
-    };
-
-    if !authz::can_delete_pool(&actor, owner) {
-        return forbidden("You cannot delete this pool");
-    }
-    let actor_id = actor.user_id;
-    let deleted =
+    let pool_id =
         sqlx::query_scalar::<_, i32>("DELETE FROM question_pools WHERE id = $1 RETURNING id")
             .bind(id)
             .fetch_optional(&state.pool)
-            .await;
+            .await
+            .map_err(db_error("Failed to delete pool"))?
+            .ok_or_else(pool_not_found)?;
+    state.parsed_pools.write().await.remove(pool_id);
 
-    match deleted {
-        Ok(Some(pool_id)) => {
-            state.parsed_pools.write().await.remove(pool_id);
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: actor_id,
-                    action: "pool.deleted",
-                    target_type: "question_pool",
-                    target_id: Some(pool_id.to_string()),
-                    metadata: json!({}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
-            (StatusCode::OK, Json(json!({"id": pool_id}))).into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Pool not found"})),
-        )
-            .into_response(),
-        Err(error) => {
-            tracing::error!(pool_id = id, error = %error, "failed to delete pool");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to delete pool"})),
-            )
-                .into_response()
-        }
-    }
+    audit::record(
+        &state.pool,
+        &client,
+        actor.user_id,
+        "pool.deleted",
+        "question_pool",
+        pool_id,
+        json!({"name": pool.name}),
+    )
+    .await;
+    ok(json!({"id": pool_id}))
 }
 
-async fn pool_books(
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    let pool = match authorize_pool_access(&state, &jar, id).await {
-        Ok((_, pool)) => pool,
-        Err(resp) => return *resp,
-    };
+async fn pool_books(State(state): State<AppState>, actor: Actor, Path(id): Path<i32>) -> ApiResult {
+    let pool = authorize_pool_access(&state, &actor, id).await?;
+    let parsed = parsed_pool(&state, &pool).await?;
+    ok(json!({
+        "books": generator::list_books(parsed.as_ref()),
+        "pool": {
+            "id": pool.id,
+            "name": pool.name,
+            "tier_id": pool.tier_id,
+            "tier_name": pool.tier_name,
+        },
+    }))
+}
 
-    let Some(parsed) = parsed_pool(&state, pool.id).await else {
-        return pool_not_found();
-    };
-    let books = generator::list_books(parsed.as_ref());
-    (
-        StatusCode::OK,
-        Json(json!({
-            "books": books,
-            "pool": {
-                "id": pool.id,
-                "name": pool.name,
-                "tier_id": pool.tier_id,
-                "tier_name": pool.tier_name,
-            },
-        })),
-    )
-        .into_response()
+fn one_set() -> usize {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -661,59 +622,40 @@ struct GenerateBody {
     situation: Option<bool>,
     seed: Option<u64>,
     books: Option<Vec<generator::BookFilter>>,
+    /// Number of sets to generate; set `i` uses `seed + i` so a seed reproduces every set.
+    #[serde(default = "one_set")]
+    sets: usize,
 }
 
 async fn generate(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
+    client: ClientMeta,
+    actor: Actor,
     Json(body): Json<GenerateBody>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
+) -> ApiResult {
+    if !(1..=MAX_SETS_PER_REQUEST).contains(&body.sets) {
+        return Err(ApiError::bad_request(format!(
+            "sets must be between 1 and {MAX_SETS_PER_REQUEST}"
+        )));
     }
+    let source_pool = authorize_pool_access(&state, &actor, body.pool_id).await?;
+    let parsed = parsed_pool(&state, &source_pool).await?;
 
-    let (actor, source_pool) = match authorize_pool_access(&state, &jar, body.pool_id).await {
-        Ok(authorized) => authorized,
-        Err(resp) => return *resp,
-    };
-    let user_id = actor.user_id;
-    let pool_id = source_pool.id;
-
-    let Some(parsed) = parsed_pool(&state, pool_id).await else {
-        return pool_not_found();
-    };
     enum GenerationSource {
         Cached(Arc<Vec<generator::QuestionRecord>>),
         Filtered(Vec<generator::QuestionRecord>),
     }
+    let no_match = || ApiError::bad_request("No questions match selected books/chapters");
 
     let generation_source = match body.books.as_ref() {
         Some(filters) if !filters.is_empty() => {
             match generator::filter_by_books_cow(parsed.as_ref(), filters) {
                 std::borrow::Cow::Borrowed(_) => GenerationSource::Cached(parsed.clone()),
-                std::borrow::Cow::Owned(filtered) if filtered.is_empty() => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": "No questions match selected books/chapters"})),
-                    )
-                        .into_response();
-                }
+                std::borrow::Cow::Owned(filtered) if filtered.is_empty() => return Err(no_match()),
                 std::borrow::Cow::Owned(filtered) => GenerationSource::Filtered(filtered),
             }
         }
-        _ if parsed.is_empty() => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "No questions match selected books/chapters"})),
-            )
-                .into_response();
-        }
+        _ if parsed.is_empty() => return Err(no_match()),
         _ => GenerationSource::Cached(parsed.clone()),
     };
 
@@ -723,282 +665,204 @@ async fn generate(
         situation: body.situation,
         seed: body.seed,
     };
-    let generation_permit = match state.generation_slots.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            return (
+    let set_count = body.sets;
+    let generation_permit = state
+        .generation_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "Question generation is unavailable"})),
+                "Question generation is unavailable",
             )
-                .into_response()
-        }
-    };
-    let generated = match tokio::task::spawn_blocking(move || {
+        })?;
+    let sets = tokio::task::spawn_blocking(move || {
         let _generation_permit = generation_permit;
-        match generation_source {
-            GenerationSource::Cached(pool) => generator::generate_questions(pool.as_ref(), &req),
-            GenerationSource::Filtered(pool) => generator::generate_questions(&pool, &req),
-        }
+        let pool = match &generation_source {
+            GenerationSource::Cached(pool) => pool.as_slice(),
+            GenerationSource::Filtered(pool) => pool.as_slice(),
+        };
+        (0..set_count)
+            .map(|i| {
+                let set_req = generator::GenerateRequest {
+                    seed: req.seed.map(|seed| seed.wrapping_add(i as u64)),
+                    ..req.clone()
+                };
+                generator::generate_questions(pool, &set_req)
+            })
+            .collect::<Vec<_>>()
     })
     .await
-    {
-        Ok(generated) => generated,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Question generation failed"})),
-            )
-                .into_response()
-        }
-    };
+    .map_err(|_| ApiError::internal("Question generation failed"))?;
 
-    audit::log_event(
+    audit::record(
         &state.pool,
-        audit::AuditEvent {
-            actor_user_id: user_id,
-            action: "questions.generated",
-            target_type: "question_pool",
-            target_id: Some(pool_id.to_string()),
-            metadata: json!({"count": generated.len()}),
-            ip_address: Some(client.ip.clone()),
-            user_agent: client.user_agent.clone(),
-        },
+        &client,
+        actor.user_id,
+        "questions.generated",
+        "question_pool",
+        source_pool.id,
+        json!({
+            "sets": sets.len(),
+            "count": sets.iter().map(Vec::len).sum::<usize>(),
+        }),
     )
     .await;
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "questions": generated,
-            "pool": {
-                "id": source_pool.id,
-                "name": source_pool.name,
-                "tier_id": source_pool.tier_id,
-                "tier_name": source_pool.tier_name,
-            },
-        })),
-    )
-        .into_response()
+    ok(json!({
+        "sets": sets,
+        "pool": {
+            "id": source_pool.id,
+            "name": source_pool.name,
+            "tier_id": source_pool.tier_id,
+            "tier_name": source_pool.tier_name,
+        },
+    }))
 }
 
+// ── Admin: tiers ──
+
 #[derive(Debug, Deserialize)]
-struct TierCreateBody {
+struct TierBody {
     name: String,
     rank: i32,
 }
 
-#[derive(Debug, Deserialize)]
-struct TierUpdateBody {
-    name: String,
-    rank: i32,
-}
-
-async fn list_tiers(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    if let Err(resp) = require_admin(&state, &jar).await {
-        return *resp;
+fn tier_write_error(message: &'static str) -> impl FnOnce(sqlx::Error) -> ApiError {
+    move |error| {
+        if is_unique_violation(&error) {
+            ApiError::conflict("A tier with that name or rank already exists")
+        } else {
+            db_error(message)(error)
+        }
     }
+}
 
+async fn list_tiers(State(state): State<AppState>, _admin: Admin) -> ApiResult {
     let tiers = sqlx::query_as::<_, Tier>("SELECT id, name, rank FROM tiers ORDER BY rank ASC")
         .fetch_all(&state.pool)
         .await
-        .unwrap_or_default();
-
-    (StatusCode::OK, Json(json!({"tiers": tiers}))).into_response()
+        .map_err(db_error("Failed to load tiers"))?;
+    ok(json!({"tiers": tiers}))
 }
 
 async fn create_tier(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
-    Json(body): Json<TierCreateBody>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return *resp,
-    };
-
+    client: ClientMeta,
+    Admin(actor): Admin,
+    Json(body): Json<TierBody>,
+) -> ApiResult {
     let name = body.name.trim();
     if name.is_empty() {
-        return bad_request("Tier name must not be empty");
+        return Err(ApiError::bad_request("Tier name must not be empty"));
     }
-    if let Err(message) = authz::validate_tier_rank(None, body.rank) {
-        return bad_request(message);
-    }
+    authz::validate_tier_rank(None, body.rank).map_err(ApiError::bad_request)?;
 
-    let created = sqlx::query_as::<_, Tier>(
+    let tier = sqlx::query_as::<_, Tier>(
         "INSERT INTO tiers (name, rank) VALUES ($1, $2) RETURNING id, name, rank",
     )
     .bind(name)
     .bind(body.rank)
     .fetch_one(&state.pool)
-    .await;
+    .await
+    .map_err(tier_write_error("Failed to create tier"))?;
 
-    match created {
-        Ok(tier) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(actor),
-                    action: "tier.created",
-                    target_type: "tier",
-                    target_id: Some(tier.id.to_string()),
-                    metadata: json!({"name": tier.name, "rank": tier.rank}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
-            (StatusCode::OK, Json(json!({"tier": tier}))).into_response()
-        }
-        Err(error) if is_unique_violation(&error) => {
-            conflict("A tier with that name or rank already exists")
-        }
-        Err(_) => bad_request("Failed to create tier"),
-    }
+    audit::record(
+        &state.pool,
+        &client,
+        Some(actor),
+        "tier.created",
+        "tier",
+        tier.id,
+        json!({"name": tier.name, "rank": tier.rank}),
+    )
+    .await;
+    ok(json!({"tier": tier}))
 }
 
 async fn update_tier(
     State(state): State<AppState>,
+    client: ClientMeta,
+    Admin(actor): Admin,
     Path(id): Path<i32>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
-    Json(body): Json<TierUpdateBody>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return *resp,
-    };
-
+    Json(body): Json<TierBody>,
+) -> ApiResult {
     let name = body.name.trim();
     if name.is_empty() {
-        return bad_request("Tier name must not be empty");
+        return Err(ApiError::bad_request("Tier name must not be empty"));
     }
-    let current_rank = match authz::tier_rank(&state.pool, id).await {
-        Ok(Some(rank)) => rank,
-        Ok(None) => return tier_not_found(),
-        Err(error) => {
-            tracing::error!(tier_id = id, error = %error, "failed to load tier");
-            return bad_request("Failed to update tier");
-        }
-    };
-    if let Err(message) = authz::validate_tier_rank(Some(current_rank), body.rank) {
-        return bad_request(message);
-    }
+    let current_rank = authz::tier_rank(&state.pool, id)
+        .await
+        .map_err(db_error("Failed to load tier"))?
+        .ok_or_else(tier_not_found)?;
+    authz::validate_tier_rank(Some(current_rank), body.rank).map_err(ApiError::bad_request)?;
 
-    let updated = sqlx::query_as::<_, Tier>(
+    let tier = sqlx::query_as::<_, Tier>(
         "UPDATE tiers SET name = $1, rank = $2 WHERE id = $3 RETURNING id, name, rank",
     )
     .bind(name)
     .bind(body.rank)
     .bind(id)
     .fetch_optional(&state.pool)
-    .await;
+    .await
+    .map_err(tier_write_error("Failed to update tier"))?
+    .ok_or_else(tier_not_found)?;
 
-    match updated {
-        Ok(Some(tier)) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(actor),
-                    action: "tier.updated",
-                    target_type: "tier",
-                    target_id: Some(tier.id.to_string()),
-                    metadata: json!({"name": tier.name, "rank": tier.rank}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
-            (StatusCode::OK, Json(json!({"tier": tier}))).into_response()
-        }
-        Ok(None) => tier_not_found(),
-        Err(error) if is_unique_violation(&error) => {
-            conflict("A tier with that name or rank already exists")
-        }
-        Err(_) => bad_request("Failed to update tier"),
-    }
+    audit::record(
+        &state.pool,
+        &client,
+        Some(actor),
+        "tier.updated",
+        "tier",
+        tier.id,
+        json!({"name": tier.name, "rank": tier.rank}),
+    )
+    .await;
+    ok(json!({"tier": tier}))
 }
 
 async fn delete_tier(
     State(state): State<AppState>,
+    client: ClientMeta,
+    Admin(actor): Admin,
     Path(id): Path<i32>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
+) -> ApiResult {
+    let rank = authz::tier_rank(&state.pool, id)
+        .await
+        .map_err(db_error("Failed to load tier"))?
+        .ok_or_else(tier_not_found)?;
+    if !authz::can_delete_tier(rank) {
+        return Err(ApiError::bad_request("The public tier cannot be deleted"));
     }
 
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return *resp,
-    };
-
-    match authz::tier_rank(&state.pool, id).await {
-        Ok(Some(rank)) if !authz::can_delete_tier(rank) => {
-            return bad_request("The public tier cannot be deleted");
-        }
-        Ok(Some(_)) => {}
-        Ok(None) => return tier_not_found(),
-        Err(error) => {
-            tracing::error!(tier_id = id, error = %error, "failed to load tier");
-            return bad_request("Failed to delete tier");
-        }
-    }
-
-    let deleted = sqlx::query_scalar::<_, i32>("DELETE FROM tiers WHERE id = $1 RETURNING id")
+    let tier_id = sqlx::query_scalar::<_, i32>("DELETE FROM tiers WHERE id = $1 RETURNING id")
         .bind(id)
         .fetch_optional(&state.pool)
-        .await;
+        .await
+        .map_err(|error| {
+            if is_foreign_key_violation(&error) {
+                ApiError::conflict("Tier is still assigned to users or pools")
+            } else {
+                db_error("Failed to delete tier")(error)
+            }
+        })?
+        .ok_or_else(tier_not_found)?;
 
-    match deleted {
-        Ok(Some(tier_id)) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(actor),
-                    action: "tier.deleted",
-                    target_type: "tier",
-                    target_id: Some(tier_id.to_string()),
-                    metadata: json!({}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
-            (StatusCode::OK, Json(json!({"deleted": tier_id}))).into_response()
-        }
-        Ok(None) => tier_not_found(),
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Failed to delete tier (possibly in use)"})),
-        )
-            .into_response(),
-    }
+    audit::record(
+        &state.pool,
+        &client,
+        Some(actor),
+        "tier.deleted",
+        "tier",
+        tier_id,
+        json!({}),
+    )
+    .await;
+    ok(json!({"deleted": tier_id}))
 }
+
+// ── Admin: users ──
 
 #[derive(Debug, Deserialize)]
 struct CreateUserBody {
@@ -1020,58 +884,63 @@ struct UpdateUserBody {
     password: Option<String>,
 }
 
-async fn list_users(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    if let Err(resp) = require_admin(&state, &jar).await {
-        return *resp;
+fn user_write_error(message: &'static str) -> impl FnOnce(sqlx::Error) -> ApiError {
+    move |error| {
+        if is_unique_violation(&error) {
+            ApiError::conflict("That username is already taken")
+        } else if is_foreign_key_violation(&error) {
+            ApiError::bad_request("Unknown tier")
+        } else {
+            db_error(message)(error)
+        }
     }
+}
 
+fn user_json(user: &User) -> Value {
+    json!({
+        "id": user.id,
+        "username": user.username,
+        "tier_id": user.tier_id,
+        "is_admin": user.is_admin,
+        "can_upload_pools": user.can_upload_pools,
+    })
+}
+
+async fn list_users(State(state): State<AppState>, _admin: Admin) -> ApiResult {
     let users = sqlx::query_as::<_, User>(
         "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    .map_err(db_error("Failed to load users"))?;
 
     let safe: Vec<_> = users
-        .into_iter()
-        .map(|u| json!({"id": u.id, "username": u.username, "tier_id": u.tier_id, "is_admin": u.is_admin, "can_upload_pools": u.can_upload_pools, "created_at": u.created_at}))
+        .iter()
+        .map(|u| {
+            let mut entry = user_json(u);
+            entry["created_at"] = json!(u.created_at);
+            entry
+        })
         .collect();
-
-    (StatusCode::OK, Json(json!({"users": safe}))).into_response()
+    ok(json!({"users": safe}))
 }
 
 async fn create_user(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
+    client: ClientMeta,
+    Admin(actor): Admin,
     Json(body): Json<CreateUserBody>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return *resp,
-    };
-
+) -> ApiResult {
     let username = body.username.trim();
     if username.is_empty() {
-        return bad_request("Username must not be empty");
+        return Err(ApiError::bad_request("Username must not be empty"));
     }
-    if let Err(message) = auth::validate_password(&body.password) {
-        return bad_request(&message);
-    }
-    let Ok(password_hash) = auth::hash_password(&body.password) else {
-        return bad_request("Invalid password");
-    };
+    auth::validate_password(&body.password).map_err(ApiError::bad_request)?;
+    let password_hash = auth::hash_password_blocking(body.password)
+        .await
+        .map_err(|_| ApiError::internal("Failed to hash password"))?;
 
-    let inserted = sqlx::query_as::<_, User>(
+    let user = sqlx::query_as::<_, User>(
         "INSERT INTO users (username, password_hash, tier_id, is_admin, can_upload_pools)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
@@ -1082,92 +951,55 @@ async fn create_user(
     .bind(body.is_admin)
     .bind(body.can_upload_pools)
     .fetch_one(&state.pool)
+    .await
+    .map_err(user_write_error("Failed to create user"))?;
+
+    let summary = user_json(&user);
+    audit::record(
+        &state.pool,
+        &client,
+        Some(actor),
+        "user.created",
+        "user",
+        user.id,
+        summary.clone(),
+    )
     .await;
-
-    match inserted {
-        Ok(user) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(actor),
-                    action: "user.created",
-                    target_type: "user",
-                    target_id: Some(user.id.to_string()),
-                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "id": user.id,
-                    "username": user.username,
-                    "tier_id": user.tier_id,
-                    "is_admin": user.is_admin,
-                    "can_upload_pools": user.can_upload_pools
-                })),
-            )
-                .into_response()
-        }
-        Err(error) if is_unique_violation(&error) => conflict("That username is already taken"),
-        Err(_) => bad_request("Failed to create user"),
-    }
+    ok(summary)
 }
 
 async fn update_user(
     State(state): State<AppState>,
-    Path(id): Path<i32>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
+    client: ClientMeta,
+    Admin(actor): Admin,
     jar: CookieJar,
+    Path(id): Path<i32>,
     Json(body): Json<UpdateUserBody>,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return *resp,
-    };
-
+) -> ApiResult {
     if actor == id && !body.is_admin {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "You cannot remove your own admin role"})),
-        )
-            .into_response();
+        return Err(ApiError::bad_request(
+            "You cannot remove your own admin role",
+        ));
     }
-
     let username = body.username.trim();
     if username.is_empty() {
-        return bad_request("Username must not be empty");
+        return Err(ApiError::bad_request("Username must not be empty"));
     }
 
     // A blank password field in the admin UI means "leave unchanged".
-    let new_password = body.password.as_deref().filter(|p| !p.trim().is_empty());
-    let password_hash = match new_password {
+    let password_hash = match body.password.as_deref().filter(|p| !p.trim().is_empty()) {
         Some(password) => {
-            if let Err(message) = auth::validate_password(password) {
-                return bad_request(&message);
-            }
-            match auth::hash_password(password) {
-                Ok(hash) => Some(hash),
-                Err(_) => return bad_request("Invalid password"),
-            }
+            auth::validate_password(password).map_err(ApiError::bad_request)?;
+            let hash = auth::hash_password_blocking(password.to_string())
+                .await
+                .map_err(|_| ApiError::internal("Failed to hash password"))?;
+            Some(hash)
         }
         None => None,
     };
     let password_changed = password_hash.is_some();
 
-    let updated = update_user_record(
+    let user = update_user_record(
         &state,
         id,
         username,
@@ -1175,47 +1007,24 @@ async fn update_user(
         password_hash,
         auth::session_token(&jar),
     )
+    .await
+    .map_err(user_write_error("Failed to update user"))?
+    .ok_or_else(user_not_found)?;
+
+    let summary = user_json(&user);
+    let mut metadata = summary.clone();
+    metadata["password_changed"] = json!(password_changed);
+    audit::record(
+        &state.pool,
+        &client,
+        Some(actor),
+        "user.updated",
+        "user",
+        user.id,
+        metadata,
+    )
     .await;
-
-    match updated {
-        Ok(Some(user)) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(actor),
-                    action: "user.updated",
-                    target_type: "user",
-                    target_id: Some(user.id.to_string()),
-                    metadata: json!({"username": user.username, "tier_id": user.tier_id, "is_admin": user.is_admin, "can_upload_pools": user.can_upload_pools, "password_changed": password_changed}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "id": user.id,
-                    "username": user.username,
-                    "tier_id": user.tier_id,
-                    "is_admin": user.is_admin,
-                    "can_upload_pools": user.can_upload_pools
-                })),
-            )
-                .into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found"})),
-        )
-            .into_response(),
-        Err(error) if is_unique_violation(&error) => conflict("That username is already taken"),
-        Err(error) => {
-            tracing::error!(user_id = id, error = %error, "failed to update user");
-            bad_request("Failed to update user")
-        }
-    }
+    ok(summary)
 }
 
 /// Applies a user edit. A password change also signs the user out of every other session,
@@ -1257,64 +1066,65 @@ async fn update_user_record(
 
 async fn delete_user(
     State(state): State<AppState>,
+    client: ClientMeta,
+    Admin(actor): Admin,
     Path(id): Path<i32>,
-    headers: HeaderMap,
-    client: security::ClientMeta,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    if !security::verify_csrf(&jar, &headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "CSRF validation failed"})),
-        )
-            .into_response();
-    }
-
-    let actor = match require_admin(&state, &jar).await {
-        Ok(id) => id,
-        Err(resp) => return *resp,
-    };
-
+) -> ApiResult {
     if actor == id {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "You cannot delete your own account"})),
-        )
-            .into_response();
+        return Err(ApiError::bad_request("You cannot delete your own account"));
     }
 
-    let deleted = sqlx::query_scalar::<_, i32>("DELETE FROM users WHERE id = $1 RETURNING id")
+    let user_id = sqlx::query_scalar::<_, i32>("DELETE FROM users WHERE id = $1 RETURNING id")
         .bind(id)
         .fetch_optional(&state.pool)
-        .await;
+        .await
+        .map_err(db_error("Failed to delete user"))?
+        .ok_or_else(user_not_found)?;
 
-    match deleted {
-        Ok(Some(user_id)) => {
-            audit::log_event(
-                &state.pool,
-                audit::AuditEvent {
-                    actor_user_id: Some(actor),
-                    action: "user.deleted",
-                    target_type: "user",
-                    target_id: Some(user_id.to_string()),
-                    metadata: json!({}),
-                    ip_address: Some(client.ip.clone()),
-                    user_agent: client.user_agent.clone(),
-                },
-            )
-            .await;
+    audit::record(
+        &state.pool,
+        &client,
+        Some(actor),
+        "user.deleted",
+        "user",
+        user_id,
+        json!({}),
+    )
+    .await;
+    ok(json!({"deleted": user_id}))
+}
 
-            (StatusCode::OK, Json(json!({"deleted": user_id}))).into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found"})),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Failed to delete user"})),
-        )
-            .into_response(),
-    }
+// ── Admin: audit log ──
+
+#[derive(Debug, Deserialize)]
+struct AuditQuery {
+    before: Option<i64>,
+    action: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn list_audit(
+    State(state): State<AppState>,
+    _admin: Admin,
+    Query(query): Query<AuditQuery>,
+) -> ApiResult {
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_AUDIT_PAGE)
+        .clamp(1, MAX_AUDIT_PAGE);
+    let action = query
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty());
+
+    let entries = audit::list(&state.pool, query.before, action, limit)
+        .await
+        .map_err(db_error("Failed to load audit log"))?;
+    let next_before = if entries.len() as i64 == limit {
+        entries.last().map(|e| e.id)
+    } else {
+        None
+    };
+    ok(json!({"entries": entries, "next_before": next_before}))
 }

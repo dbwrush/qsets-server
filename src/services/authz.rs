@@ -1,7 +1,11 @@
+use std::convert::Infallible;
+
+use axum::{async_trait, extract::FromRequestParts, http::request::Parts};
 use axum_extra::extract::cookie::CookieJar;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::services::auth;
+use crate::{services::auth, state::AppState};
 
 /// Rank granted to anonymous visitors; matches the seeded `public` tier.
 pub const ANONYMOUS_TIER_RANK: i32 = 0;
@@ -25,6 +29,20 @@ impl Actor {
     }
 }
 
+/// Resolves the caller from the session cookie; anyone without a valid session is anonymous.
+#[async_trait]
+impl FromRequestParts<AppState> for Actor {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let jar = CookieJar::from_headers(&parts.headers);
+        Ok(load_actor(&state.pool, &jar).await)
+    }
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PoolAccess {
     pub id: i32,
@@ -32,6 +50,8 @@ pub struct PoolAccess {
     pub tier_id: i32,
     pub tier_name: String,
     pub tier_rank: i32,
+    pub created_by: Option<i32>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A pool is readable when its tier sits at or below the actor's tier.
@@ -51,13 +71,16 @@ pub fn can_upload(actor: &Actor) -> bool {
     actor.is_admin || actor.can_upload_pools
 }
 
-/// Pools may be removed by an admin or by the uploader who created them.
-pub fn can_delete_pool(actor: &Actor, pool_created_by: Option<i32>) -> bool {
+/// Pools may be replaced or deleted by an admin, or by the uploader who created them while they
+/// still have upload permission and a tier at or above the pool's.
+pub fn can_manage_pool(actor: &Actor, pool_created_by: Option<i32>, pool_tier_rank: i32) -> bool {
     if actor.is_admin {
         return true;
     }
     match (actor.user_id, pool_created_by) {
-        (Some(actor_id), Some(owner_id)) => actor.can_upload_pools && actor_id == owner_id,
+        (Some(actor_id), Some(owner_id)) => {
+            actor_id == owner_id && can_assign_pool_tier(actor, pool_tier_rank)
+        }
         _ => false,
     }
 }
@@ -112,7 +135,8 @@ pub async fn load_pool_access(
     pool_id: i32,
 ) -> Result<Option<PoolAccess>, sqlx::Error> {
     sqlx::query_as::<_, PoolAccess>(
-        "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank
+        "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank,
+                qp.created_by, qp.updated_at
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
          WHERE qp.id = $1",
@@ -220,18 +244,24 @@ mod tests {
     }
 
     #[test]
-    fn uploader_may_delete_only_own_pool() {
+    fn uploader_may_manage_only_own_pool() {
         let uploader = actor(1, false, true);
-        assert!(can_delete_pool(&uploader, Some(1)));
-        assert!(!can_delete_pool(&uploader, Some(2)));
-        assert!(!can_delete_pool(&uploader, None));
+        assert!(can_manage_pool(&uploader, Some(1), 1));
+        assert!(!can_manage_pool(&uploader, Some(2), 1));
+        assert!(!can_manage_pool(&uploader, None, 0));
     }
 
     #[test]
-    fn admin_may_delete_any_pool() {
+    fn uploader_loses_control_of_pools_above_their_current_tier_or_without_permission() {
+        assert!(!can_manage_pool(&actor(1, false, true), Some(1), 2));
+        assert!(!can_manage_pool(&actor(1, false, false), Some(1), 1));
+    }
+
+    #[test]
+    fn admin_may_manage_any_pool() {
         let admin = actor(0, true, false);
-        assert!(can_delete_pool(&admin, Some(2)));
-        assert!(can_delete_pool(&admin, None));
+        assert!(can_manage_pool(&admin, Some(2), 5));
+        assert!(can_manage_pool(&admin, None, 0));
     }
 
     #[test]
@@ -251,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_may_not_delete_pools() {
-        assert!(!can_delete_pool(&Actor::anonymous(), Some(1)));
+    fn anonymous_may_not_manage_pools() {
+        assert!(!can_manage_pool(&Actor::anonymous(), Some(1), 0));
     }
 }
