@@ -1,22 +1,12 @@
-mod models;
-mod routes;
-mod services;
-mod state;
-
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::time::Duration;
 
-use axum::{routing::get_service, Router};
+use qsets_server::{services::auth, state::AppState};
 use sqlx::postgres::PgPoolOptions;
-use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{
-    routes::{api, pages},
-    services::auth,
-    state::AppState,
-};
+const EXPIRED_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 fn load_env_file(path: &str, shell_keys: &HashSet<String>, allow_override_non_shell: bool) {
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -74,8 +64,23 @@ async fn main() {
     let admin_username = std::env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string());
     let admin_password = std::env::var("ADMIN_PASSWORD")
         .expect("ADMIN_PASSWORD is required; set a strong value before starting the server");
-    if app_env != "development" && admin_password == "change-me" {
-        panic!("ADMIN_PASSWORD must be changed outside the development environment");
+    if app_env != "development" {
+        if admin_password == "change-me" {
+            panic!("ADMIN_PASSWORD must be changed outside the development environment");
+        }
+        if let Err(message) = auth::validate_password(&admin_password) {
+            panic!("ADMIN_PASSWORD is too weak: {message}");
+        }
+    }
+    let trust_proxy = std::env::var("TRUST_PROXY")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "static".to_string());
+    if !std::path::Path::new(&static_dir).is_dir() {
+        tracing::warn!(
+            static_dir,
+            "static asset directory not found; set STATIC_DIR or start from the repository root"
+        );
     }
     let generation_concurrency = std::env::var("GENERATION_CONCURRENCY")
         .map(|value| {
@@ -105,16 +110,21 @@ async fn main() {
         .await
         .expect("failed to create default admin");
 
-    let state = AppState {
-        pool,
-        parsed_pools: Arc::default(),
-        generation_slots: Arc::new(tokio::sync::Semaphore::new(generation_concurrency)),
-    };
+    let sweep_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(EXPIRED_SESSION_SWEEP_INTERVAL);
+        loop {
+            interval.tick().await;
+            match auth::delete_expired_sessions(&sweep_pool).await {
+                Ok(0) => {}
+                Ok(removed) => tracing::debug!(removed, "deleted expired sessions"),
+                Err(error) => tracing::warn!(error = %error, "failed to delete expired sessions"),
+            }
+        }
+    });
 
-    let app = Router::new()
-        .merge(api::router(state.clone()))
-        .merge(pages::router(state.clone()))
-        .nest_service("/static", get_service(ServeDir::new("static")));
+    let state = AppState::new(pool, generation_concurrency, trust_proxy);
+    let app = qsets_server::app(state, &static_dir);
 
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");
     let listener = tokio::net::TcpListener::bind(addr)
@@ -122,5 +132,10 @@ async fn main() {
         .expect("bind failed");
 
     tracing::info!("listening on {}", addr);
-    axum::serve(listener, app).await.expect("server failed");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server failed");
 }

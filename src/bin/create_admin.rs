@@ -17,8 +17,8 @@ async fn main() {
         eprintln!("Username must not be empty");
         std::process::exit(1);
     }
-    if password.len() < 8 {
-        eprintln!("Password must be at least 8 characters long");
+    if let Err(message) = auth::validate_password(&password) {
+        eprintln!("{message}");
         std::process::exit(1);
     }
 

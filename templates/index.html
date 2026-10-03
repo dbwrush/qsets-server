@@ -6,7 +6,7 @@
   <title>QSets — Bible Quiz Set Generator</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body>
+<body data-csrf="{{ csrf_token }}" data-authenticated="{{ is_authenticated }}" data-username="{{ username }}">
   <header class="header">
     <div class="header-left">
       <a href="/"><h1>QSets</h1></a>
@@ -110,11 +110,6 @@
     Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank">Michael Parenti</a>
   </footer>
 
-  <script>
-    window.QSETS_CSRF = "{{ csrf_token }}";
-    window.QSETS_IS_AUTHENTICATED = {{ is_authenticated|lower }};
-    window.QSETS_USERNAME = "{{ username }}";
-  </script>
   <script src="/static/main.js"></script>
 </body>
 </html>
