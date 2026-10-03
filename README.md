@@ -12,14 +12,19 @@ Rust/Axum + Askama web server for Nazarene Bible quizzing question pools with ti
 
 ## Features
 
-- Session login with Argon2 password verification
-- CSRF token checks on mutating API endpoints
-- Login attempt throttling
-- Signs a user out of their other sessions when their password changes
+- Session login with Argon2 password verification; unknown usernames take as long to reject
+  as wrong passwords, so timing does not reveal which accounts exist
+- CSRF token checks on every mutating API endpoint, applied as middleware
+- Login throttling per account-and-client, per client (stops password spraying) and per
+  account (slows distributed guessing; anyone can spend this limit to lock an account out
+  for 15 minutes, which is why it is set much higher than the others)
+- Self-service password change at `/account`; any password change signs the user out of
+  their other sessions
 - Content-Security-Policy and related security headers on every response
 - Tier-based pool visibility with inherited lower-tier access
-- Admin endpoints and UI for pool upload, tier creation, and user creation
-- Audit logging for login/logout, generation, pool upload, tier creation, user creation
+- Admin endpoints and UI for pool upload, replacement and deletion, tier creation, and user creation
+- Audit logging for login/logout, password changes, generation, pool, tier and user changes,
+  with an admin viewer and configurable retention
 - Seeded generation mode for deterministic output
 
 ## Generation Modes
@@ -46,6 +51,8 @@ Copy `.env.example` to `.env`, then optionally add an environment-specific overr
 - `TRUST_PROXY` (default `false`): set to `true` only when a reverse proxy sets
   `X-Forwarded-For`. When false the header is ignored, because clients could otherwise
   forge it to dodge login throttling and falsify audit-log IPs.
+- `AUDIT_RETENTION_DAYS` (default `365`): audit entries older than this are deleted by an
+  hourly sweep. `0` keeps them forever.
 - `STATIC_DIR` (default `static`): location of the CSS/JS assets. Relative paths resolve
   against the working directory; templates are compiled into the binary.
 

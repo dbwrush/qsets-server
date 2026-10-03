@@ -1,7 +1,8 @@
 use askama::Template;
 use axum::{
     extract::State,
-    response::{Html, IntoResponse},
+    http::StatusCode,
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -34,91 +35,100 @@ struct AdminTemplate<'a> {
     is_admin: bool,
 }
 
+#[derive(Template)]
+#[template(path = "account.html")]
+struct AccountTemplate<'a> {
+    csrf_token: &'a str,
+    username: &'a str,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/login", get(login))
+        .route("/account", get(account_page))
         .route("/admin", get(admin_page))
         .with_state(state)
 }
 
-async fn index(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {
     let (jar, csrf) = security::ensure_csrf_cookie(jar);
+    let user = signed_in_user(&state, &jar).await;
+    let username = user
+        .as_ref()
+        .map(|(name, _, _)| name.as_str())
+        .unwrap_or("");
 
-    let (is_authenticated, username) =
-        if let Some(user_id) = auth::get_user_id_from_jar(&state.pool, &jar).await {
-            let user = sqlx::query_as::<_, (String,)>("SELECT username FROM users WHERE id = $1")
-                .bind(user_id)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or(None);
-            match user {
-                Some((uname,)) => (true, uname),
-                None => (false, String::new()),
-            }
-        } else {
-            (false, String::new())
-        };
-
-    let page = IndexTemplate {
-        csrf_token: &csrf,
-        is_authenticated,
-        username: &username,
-    };
-    (
+    render(
         jar,
-        Html(
-            page.render()
-                .unwrap_or_else(|_| "Template error".to_string()),
-        ),
+        IndexTemplate {
+            csrf_token: &csrf,
+            is_authenticated: user.is_some(),
+            username,
+        },
     )
 }
 
-async fn login(jar: CookieJar) -> impl IntoResponse {
+async fn login(jar: CookieJar) -> Response {
     let (jar, csrf) = security::ensure_csrf_cookie(jar);
-    let page = LoginTemplate { csrf_token: &csrf };
-    (
-        jar,
-        Html(
-            page.render()
-                .unwrap_or_else(|_| "Template error".to_string()),
-        ),
-    )
+    render(jar, LoginTemplate { csrf_token: &csrf })
 }
 
-async fn admin_page(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    let Some(user_id) = auth::get_user_id_from_jar(&state.pool, &jar).await else {
-        return (jar, Html("Unauthorized".to_string())).into_response();
-    };
+fn render(jar: CookieJar, page: impl Template) -> Response {
+    match page.render() {
+        Ok(html) => (jar, Html(html)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to render template");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+        }
+    }
+}
 
-    let user_row = sqlx::query_as::<_, (String, bool, bool)>(
+fn forbidden_page() -> Response {
+    (StatusCode::FORBIDDEN, Html("Forbidden")).into_response()
+}
+
+/// Username and permissions of the signed-in user, or `None` for anonymous visitors.
+async fn signed_in_user(state: &AppState, jar: &CookieJar) -> Option<(String, bool, bool)> {
+    let user_id = auth::get_user_id_from_jar(&state.pool, jar).await?;
+    sqlx::query_as::<_, (String, bool, bool)>(
         "SELECT username, is_admin, can_upload_pools FROM users WHERE id = $1",
     )
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    .unwrap_or(None)
+}
 
-    let Some((username, is_admin, can_upload_pools)) = user_row else {
-        return (jar, Html("Forbidden".to_string())).into_response();
+async fn account_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let Some((username, _, _)) = signed_in_user(&state, &jar).await else {
+        return Redirect::to("/login").into_response();
     };
+    let (jar, csrf) = security::ensure_csrf_cookie(jar);
+    render(
+        jar,
+        AccountTemplate {
+            csrf_token: &csrf,
+            username: &username,
+        },
+    )
+}
 
+async fn admin_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let Some((username, is_admin, can_upload_pools)) = signed_in_user(&state, &jar).await else {
+        return Redirect::to("/login").into_response();
+    };
     if !is_admin && !can_upload_pools {
-        return (jar, Html("Forbidden".to_string())).into_response();
+        return forbidden_page();
     }
 
     let (jar, csrf) = security::ensure_csrf_cookie(jar);
-    let page = AdminTemplate {
-        csrf_token: &csrf,
-        username: &username,
-        is_admin,
-    };
-    (
+    render(
         jar,
-        Html(
-            page.render()
-                .unwrap_or_else(|_| "Template error".to_string()),
-        ),
+        AdminTemplate {
+            csrf_token: &csrf,
+            username: &username,
+            is_admin,
+        },
     )
-        .into_response()
 }

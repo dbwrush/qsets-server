@@ -55,21 +55,41 @@ fn get(uri: &str, session: Option<&str>) -> Request<Body> {
         .unwrap()
 }
 
-fn upload_request(session: &str, name: &str, tier_id: i32, csv: &str) -> Request<Body> {
-    let boundary = "qsets-test-boundary";
-    let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n\
-         --{boundary}\r\nContent-Disposition: form-data; name=\"tier_id\"\r\n\r\n{tier_id}\r\n\
-         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"pool.csv\"\r\n\
-         Content-Type: text/csv\r\n\r\n{csv}\r\n--{boundary}--\r\n"
-    );
-    request(Method::POST, "/api/pools", Some(session))
+const BOUNDARY: &str = "qsets-test-boundary";
+
+fn multipart_file(csv: &str) -> String {
+    format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"pool.csv\"\r\n\
+         Content-Type: text/csv\r\n\r\n{csv}\r\n--{BOUNDARY}--\r\n"
+    )
+}
+
+fn multipart_request(method: Method, uri: &str, session: &str, body: String) -> Request<Body> {
+    request(method, uri, Some(session))
         .header(
             header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={boundary}"),
+            format!("multipart/form-data; boundary={BOUNDARY}"),
         )
         .body(Body::from(body))
         .unwrap()
+}
+
+fn upload_request(session: &str, name: &str, tier_id: i32, csv: &str) -> Request<Body> {
+    let body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n\
+         --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"tier_id\"\r\n\r\n{tier_id}\r\n{}",
+        multipart_file(csv)
+    );
+    multipart_request(Method::POST, "/api/pools", session, body)
+}
+
+fn replace_request(session: &str, pool_id: i32, csv: &str) -> Request<Body> {
+    multipart_request(
+        Method::PUT,
+        &format!("/api/pools/{pool_id}"),
+        session,
+        multipart_file(csv),
+    )
 }
 
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
@@ -195,7 +215,7 @@ async fn pools_above_the_callers_tier_are_hidden_and_forbidden(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["questions"].as_array().unwrap().len(), 2);
+    assert_eq!(body["sets"][0].as_array().unwrap().len(), 2);
 }
 
 #[sqlx::test]
@@ -290,7 +310,6 @@ fn login_attempt(username: &str, password: &str, forwarded_for: &str) -> Request
 
 #[sqlx::test]
 async fn login_throttle_cannot_be_bypassed_with_forwarded_headers(pool: PgPool) {
-    // The throttle is process-wide, so this username must be unique across the test binary.
     let username = "throttle-untrusted";
     let app = app(&pool);
     create_user(&pool, username, public_tier(&pool).await, false, false).await;
@@ -507,4 +526,299 @@ async fn responses_carry_security_headers(pool: PgPool) {
     assert!(csp.contains("script-src 'self'"));
     assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
     assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+}
+
+fn generate_request(pool_id: i32, extra: Value) -> Request<Body> {
+    let mut body = json!({"pool_id": pool_id, "question_type": "all", "count": 3});
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    json_request(Method::POST, "/api/generate", None, body)
+}
+
+fn questions(set: &Value) -> Vec<String> {
+    set.as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["question"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[sqlx::test]
+async fn csrf_is_checked_before_the_body_is_parsed(pool: PgPool) {
+    let forged = Request::builder()
+        .method(Method::POST)
+        .uri("/api/admin/tiers")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("not json"))
+        .unwrap();
+    let (status, body) = send(&app(&pool), forged).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "CSRF validation failed");
+}
+
+#[sqlx::test]
+async fn login_throttle_stops_password_spraying_from_one_client(pool: PgPool) {
+    let app = app(&pool);
+    create_user(&pool, "victim", public_tier(&pool).await, false, false).await;
+
+    for n in 0..50 {
+        let (status, _) = send(
+            &app,
+            login_attempt(&format!("guess-{n}"), "wrong", "198.51.100.1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = send(&app, login_attempt("victim", PASSWORD, "198.51.100.1")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test]
+async fn unknown_and_known_users_get_the_same_login_failure(pool: PgPool) {
+    let app = app(&pool);
+    create_user(&pool, "known", public_tier(&pool).await, false, false).await;
+
+    let (status, unknown) = send(&app, login_attempt("nobody", "wrong", "")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, known) = send(&app, login_attempt("known", "wrong", "")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown, known);
+}
+
+#[sqlx::test]
+async fn users_can_change_their_own_password(pool: PgPool) {
+    let app = app(&pool);
+    let user = create_user(&pool, "member", public_tier(&pool).await, false, false).await;
+    let current = session(&pool, user).await;
+    let other = session(&pool, user).await;
+    let change = |current_password: &str, new_password: &str| {
+        json_request(
+            Method::POST,
+            "/api/me/password",
+            Some(&current),
+            json!({"current_password": current_password, "new_password": new_password}),
+        )
+    };
+
+    let (status, _) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/me/password",
+            None,
+            json!({"current_password": PASSWORD, "new_password": "whatever long"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(&app, change("not my password", "a fresh password")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(&app, change(PASSWORD, "short")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = send(&app, change(PASSWORD, "a fresh password")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = send(&app, get("/api/me", Some(&current))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, get("/api/me", Some(&other))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(&app, login_attempt("member", PASSWORD, "")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, login_attempt("member", "a fresh password", "")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn wrong_current_passwords_are_throttled(pool: PgPool) {
+    let app = app(&pool);
+    let user = create_user(&pool, "member", public_tier(&pool).await, false, false).await;
+    let token = session(&pool, user).await;
+    let attempt = |current_password: &str| {
+        json_request(
+            Method::POST,
+            "/api/me/password",
+            Some(&token),
+            json!({"current_password": current_password, "new_password": "a fresh password"}),
+        )
+    };
+
+    for _ in 0..10 {
+        let (status, _) = send(&app, attempt("wrong")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, _) = send(&app, attempt(PASSWORD)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test]
+async fn owners_can_replace_a_pool_and_generation_sees_the_new_questions(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let owner = create_user(&pool, "owner", public, false, true).await;
+    let other = create_user(&pool, "other-uploader", public, false, true).await;
+    let owner_session = session(&pool, owner).await;
+    let other_session = session(&pool, other).await;
+
+    let (status, body) = send(
+        &app,
+        upload_request(&owner_session, "owned", public, SAMPLE_CSV),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pool_id = body["id"].as_i64().unwrap() as i32;
+
+    // Generate first so the old CSV is cached.
+    let (status, body) = send(&app, generate_request(pool_id, json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(questions(&body["sets"][0]).contains(&"Who was in the beginning?".to_string()));
+
+    let replacement = "Question,Type,Reference,Answer\n\
+        Who sent John?,General,John 1:6,God\n";
+    let (status, _) = send(&app, replace_request(&other_session, pool_id, replacement)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(&app, replace_request(&owner_session, pool_id, "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = send(&app, replace_request(&owner_session, pool_id, replacement)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["validation"]["valid_count"], 1);
+
+    let (status, body) = send(&app, generate_request(pool_id, json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(questions(&body["sets"][0]), ["Who sent John?"]);
+
+    let (_, body) = send(&app, get("/api/pools", Some(&owner_session))).await;
+    assert_eq!(body["pools"][0]["can_manage"], true);
+    let (_, body) = send(&app, get("/api/pools", Some(&other_session))).await;
+    assert_eq!(body["pools"][0]["can_manage"], false);
+}
+
+#[sqlx::test]
+async fn generate_returns_several_reproducible_sets_in_one_request(pool: PgPool) {
+    let app = app(&pool);
+    let pool_id = create_pool(&pool, "public-pool", public_tier(&pool).await).await;
+
+    let (status, first) = send(
+        &app,
+        generate_request(pool_id, json!({"sets": 4, "seed": 7})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["sets"].as_array().unwrap().len(), 4);
+    let (_, again) = send(
+        &app,
+        generate_request(pool_id, json!({"sets": 4, "seed": 7})),
+    )
+    .await;
+    assert_eq!(first["sets"], again["sets"]);
+
+    // Set i uses seed + i, so a single-set request with seed 8 matches set 1 above.
+    let (_, shifted) = send(&app, generate_request(pool_id, json!({"seed": 8}))).await;
+    assert_eq!(shifted["sets"][0], first["sets"][1]);
+
+    for sets in [0, 21] {
+        let (status, _) = send(&app, generate_request(pool_id, json!({"sets": sets}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[sqlx::test]
+async fn admins_can_page_and_filter_the_audit_log(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let admin = create_user(&pool, "admin", public, true, true).await;
+    let member = create_user(&pool, "member", public, false, false).await;
+    let admin_session = session(&pool, admin).await;
+    let member_session = session(&pool, member).await;
+
+    for n in 0..3 {
+        send(&app, login_attempt("member", &format!("wrong-{n}"), "")).await;
+    }
+    let pool_id = create_pool(&pool, "public-pool", public).await;
+    send(&app, generate_request(pool_id, json!({}))).await;
+
+    let (status, _) = send(&app, get("/api/admin/audit", Some(&member_session))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(&app, get("/api/admin/audit", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = send(
+        &app,
+        get(
+            "/api/admin/audit?action=login.&limit=2",
+            Some(&admin_session),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let page = body["entries"].as_array().unwrap();
+    assert_eq!(page.len(), 2);
+    assert!(page.iter().all(|e| e["action"] == "login.failed"));
+    assert_eq!(page[0]["actor_username"], "member");
+    let before = body["next_before"].as_i64().unwrap();
+
+    let (_, body) = send(
+        &app,
+        get(
+            &format!("/api/admin/audit?action=login.&limit=2&before={before}"),
+            Some(&admin_session),
+        ),
+    )
+    .await;
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+    assert!(body["next_before"].is_null());
+
+    let (_, body) = send(&app, get("/api/admin/audit", Some(&admin_session))).await;
+    assert_eq!(body["entries"][0]["action"], "questions.generated");
+}
+
+#[sqlx::test]
+async fn admin_page_redirects_visitors_and_forbids_plain_users(pool: PgPool) {
+    let app = app(&pool);
+    let member = create_user(&pool, "member", public_tier(&pool).await, false, false).await;
+    let member_session = session(&pool, member).await;
+
+    for page in ["/admin", "/account"] {
+        let response = app.clone().oneshot(get(page, None)).await.unwrap();
+        assert!(response.status().is_redirection(), "{page}");
+        assert_eq!(response.headers()[header::LOCATION], "/login");
+    }
+
+    let response = app
+        .clone()
+        .oneshot(get("/admin", Some(&member_session)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app
+        .clone()
+        .oneshot(get("/account", Some(&member_session)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn tiers_in_use_cannot_be_deleted(pool: PgPool) {
+    let app = app(&pool);
+    let admin = create_user(&pool, "admin", public_tier(&pool).await, true, true).await;
+    let admin_session = session(&pool, admin).await;
+    let district = create_tier(&pool, "district", 1).await;
+    create_user(&pool, "district-user", district, false, false).await;
+
+    let (status, body) = send(
+        &app,
+        request(
+            Method::DELETE,
+            &format!("/api/admin/tiers/{district}"),
+            Some(&admin_session),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }

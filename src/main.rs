@@ -2,11 +2,15 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use qsets_server::{services::auth, state::AppState};
+use qsets_server::{
+    services::{audit, auth},
+    state::AppState,
+};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-const EXPIRED_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const MAINTENANCE_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 365;
 
 fn load_env_file(path: &str, shell_keys: &HashSet<String>, allow_override_non_shell: bool) {
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -94,6 +98,15 @@ async fn main() {
                 .unwrap_or(2)
         })
         .max(1);
+    // 0 keeps audit entries forever.
+    let audit_retention_days = std::env::var("AUDIT_RETENTION_DAYS")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .expect("AUDIT_RETENTION_DAYS must be a non-negative whole number of days")
+        })
+        .unwrap_or(DEFAULT_AUDIT_RETENTION_DAYS)
+        .min(audit::MAX_RETENTION_DAYS);
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -110,15 +123,26 @@ async fn main() {
         .await
         .expect("failed to create default admin");
 
+    auth::prepare_dummy_hash();
+
     let sweep_pool = pool.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(EXPIRED_SESSION_SWEEP_INTERVAL);
+        let mut interval = tokio::time::interval(MAINTENANCE_SWEEP_INTERVAL);
         loop {
             interval.tick().await;
             match auth::delete_expired_sessions(&sweep_pool).await {
                 Ok(0) => {}
                 Ok(removed) => tracing::debug!(removed, "deleted expired sessions"),
                 Err(error) => tracing::warn!(error = %error, "failed to delete expired sessions"),
+            }
+            if audit_retention_days > 0 {
+                match audit::delete_older_than(&sweep_pool, audit_retention_days).await {
+                    Ok(0) => {}
+                    Ok(removed) => tracing::info!(removed, "deleted expired audit entries"),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to delete expired audit entries")
+                    }
+                }
             }
         }
     });

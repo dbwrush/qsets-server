@@ -40,6 +40,7 @@ document.querySelectorAll(".admin-tab").forEach(tab => {
     const tabId = tab.dataset.tab;
     if (tabId === "tab-tiers" && !tabsLoaded.tiers) { tabsLoaded.tiers = true; loadTiers(); }
     if (tabId === "tab-users" && !tabsLoaded.users) { tabsLoaded.users = true; loadUsers(); }
+    if (tabId === "tab-audit" && !tabsLoaded.audit) { tabsLoaded.audit = true; loadAudit(); }
   });
 });
 
@@ -80,6 +81,7 @@ async function loadAllTiers() {
 
 document.addEventListener("DOMContentLoaded", () => {
   void loadAssignableTiers();
+  void loadManagedPools();
 });
 
 // ── Pool upload ──
@@ -88,19 +90,97 @@ document.getElementById("upload-form")?.addEventListener("submit", async (e) => 
   const fd = new FormData(e.target);
   const status = document.getElementById("upload-status");
   try {
-    const headers = {};
-    if (window.QSETS_CSRF) headers["x-csrf-token"] = window.QSETS_CSRF;
-    const res = await fetch("/api/pools", { method: "POST", headers, body: fd });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "Upload failed");
-
-    let msg = `Uploaded pool #${data.id} — ${data.validation?.valid_count ?? "?"} valid questions`;
-    if (data.validation?.skipped_count > 0) msg += `, ${data.validation.skipped_count} rows skipped`;
-    status.innerHTML = `<p class="msg-success">${escapeHtml(msg)}</p>`;
+    const data = await adminApi("/api/pools", { method: "POST", body: fd });
+    status.innerHTML = `<p class="msg-success">${escapeHtml(validationMessage(`Uploaded pool #${data.id}`, data.validation))}</p>`;
+    e.target.reset();
+    void loadManagedPools();
   } catch (err) {
     status.innerHTML = `<p class="msg-error">${escapeHtml(err.message)}</p>`;
   }
 });
+
+function validationMessage(prefix, validation) {
+  let msg = `${prefix} — ${validation?.valid_count ?? "?"} valid questions`;
+  if (validation?.skipped_count > 0) msg += `, ${validation.skipped_count} rows skipped`;
+  return msg;
+}
+
+// ── Manage pools (replace / delete) ──
+let replaceTarget = null;
+
+async function loadManagedPools() {
+  const container = document.getElementById("pools-table");
+  if (!container) return;
+  container.innerHTML = '<p class="msg-info">Loading…</p>';
+  try {
+    const data = await adminApi("/api/pools");
+    renderPoolsTable((data.pools || []).filter(p => p.can_manage), container);
+  } catch (err) {
+    container.innerHTML = `<p class="msg-error">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderPoolsTable(pools, container) {
+  if (!pools.length) { container.innerHTML = '<p class="msg-info">No pools you can manage.</p>'; return; }
+  let html = `<table class="data-table">
+    <thead><tr><th>Name</th><th>Tier</th><th>Last updated</th><th></th></tr></thead><tbody>`;
+  pools.forEach(p => {
+    html += `<tr data-id="${p.id}" data-name="${escapeHtml(p.name)}">
+      <td>${escapeHtml(p.name)}</td>
+      <td>${escapeHtml(p.tier_name)}</td>
+      <td>${escapeHtml(new Date(p.updated_at).toLocaleString())}</td>
+      <td class="admin-actions">
+        <button class="btn-icon replace-pool" title="Replace CSV">&#8635;</button>
+        <button class="btn-icon danger delete-pool" title="Delete">&#128465;</button>
+      </td>
+    </tr>`;
+  });
+  html += "</tbody></table>";
+  container.innerHTML = html;
+
+  container.querySelectorAll(".replace-pool").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest("tr");
+      replaceTarget = { id: row.dataset.id, name: row.dataset.name };
+      document.getElementById("replace-file").click();
+    });
+  });
+  container.querySelectorAll(".delete-pool").forEach(btn => {
+    btn.addEventListener("click", () => deletePool(btn.closest("tr")));
+  });
+}
+
+document.getElementById("replace-file")?.addEventListener("change", async (e) => {
+  const input = e.target;
+  const file = input.files?.[0];
+  const target = replaceTarget;
+  input.value = "";
+  replaceTarget = null;
+  if (!file || !target) return;
+  if (!confirm(`Replace the questions in "${target.name}" with ${file.name}?`)) return;
+
+  const status = document.getElementById("replace-status");
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const data = await adminApi(`/api/pools/${target.id}`, { method: "PUT", body: fd });
+    status.innerHTML = `<p class="msg-success">${escapeHtml(validationMessage(`Replaced "${target.name}"`, data.validation))}</p>`;
+    void loadManagedPools();
+  } catch (err) {
+    status.innerHTML = `<p class="msg-error">${escapeHtml(err.message)}</p>`;
+  }
+});
+
+async function deletePool(row) {
+  const name = row.dataset.name;
+  if (!confirm(`Delete pool "${name}"? This cannot be undone.`)) return;
+  try {
+    await adminApi(`/api/pools/${row.dataset.id}`, { method: "DELETE" });
+    void loadManagedPools();
+  } catch (err) {
+    alert(err.message);
+  }
+}
 
 // ── Tiers ──
 async function loadTiers() {
@@ -348,3 +428,56 @@ document.getElementById("user-form")?.addEventListener("submit", async (e) => {
     alert(err.message);
   }
 });
+
+// ── Audit log ──
+let auditNextBefore = null;
+
+function auditUrl(before) {
+  const params = new URLSearchParams();
+  const action = document.getElementById("audit-action")?.value;
+  if (action) params.set("action", action);
+  if (before != null) params.set("before", before);
+  const query = params.toString();
+  return query ? `/api/admin/audit?${query}` : "/api/admin/audit";
+}
+
+async function loadAudit(append = false) {
+  const container = document.getElementById("audit-table");
+  const more = document.getElementById("audit-more");
+  if (!append) container.innerHTML = '<p class="msg-info">Loading…</p>';
+  try {
+    const data = await adminApi(auditUrl(append ? auditNextBefore : null));
+    auditNextBefore = data.next_before;
+    renderAudit(data.entries || [], container, append);
+    more.hidden = auditNextBefore == null;
+  } catch (err) {
+    container.innerHTML = `<p class="msg-error">${escapeHtml(err.message)}</p>`;
+    more.hidden = true;
+  }
+}
+
+function auditDetails(metadata) {
+  if (!metadata || typeof metadata !== "object" || !Object.keys(metadata).length) return "";
+  return Object.entries(metadata).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ");
+}
+
+function renderAudit(entries, container, append) {
+  const rows = entries.map(e => `<tr>
+      <td>${escapeHtml(new Date(e.created_at).toLocaleString())}</td>
+      <td>${escapeHtml(e.actor_username ?? (e.actor_user_id != null ? `#${e.actor_user_id}` : "—"))}</td>
+      <td>${escapeHtml(e.action)}</td>
+      <td>${escapeHtml(`${e.target_type}${e.target_id ? ` ${e.target_id}` : ""}`)}</td>
+      <td title="${escapeHtml(e.user_agent || "")}">${escapeHtml(e.ip_address || "")}</td>
+      <td>${escapeHtml(auditDetails(e.metadata))}</td>
+    </tr>`).join("");
+
+  const tbody = container.querySelector("tbody");
+  if (append && tbody) { tbody.insertAdjacentHTML("beforeend", rows); return; }
+  if (!entries.length) { container.innerHTML = '<p class="msg-info">No audit entries.</p>'; return; }
+  container.innerHTML = `<table class="data-table">
+    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>IP</th><th>Details</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+document.getElementById("audit-action")?.addEventListener("change", () => loadAudit());
+document.getElementById("audit-more")?.addEventListener("click", () => loadAudit(true));

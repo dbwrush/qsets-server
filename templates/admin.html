@@ -16,6 +16,7 @@
       <a href="https://qschedule.dbwrush.com" class="nav-link">QuizSchedule</a>
       <a href="https://www.quizstuff.com" class="nav-link">QuizStuff</a>
       <span class="user-info">{{ username }}</span>
+      <a href="/account">Account</a>
       <a href="#" id="logout-link">Logout</a>
     </div>
   </header>
@@ -29,6 +30,7 @@
         {% if is_admin %}
         <button class="admin-tab" data-tab="tab-tiers">Tiers</button>
         <button class="admin-tab" data-tab="tab-users">Users</button>
+        <button class="admin-tab" data-tab="tab-audit">Audit Log</button>
         {% endif %}
       </nav>
 
@@ -52,6 +54,12 @@
           <button type="submit" class="btn-primary">Upload</button>
         </form>
         <div id="upload-status"></div>
+
+        <h3>Manage Pools</h3>
+        <p class="form-hint">Replacing a pool swaps in a new CSV and keeps its name and tier.</p>
+        <input type="file" id="replace-file" accept=".csv" hidden />
+        <div id="replace-status"></div>
+        <div id="pools-table"></div>
       </section>
 
       {% if is_admin %}
@@ -101,6 +109,28 @@
           <button type="submit" class="btn-primary">Create</button>
         </form>
         <div id="users-table"></div>
+      </section>
+
+      <!-- Audit tab -->
+      <section class="admin-tab-content" id="tab-audit">
+        <h3>Audit Log</h3>
+        <form id="audit-filter" class="create-form">
+          <div class="form-group">
+            <label for="audit-action">Action</label>
+            <select id="audit-action" name="action">
+              <option value="">All actions</option>
+              <option value="login.">Logins</option>
+              <option value="logout">Logouts</option>
+              <option value="pool.">Pools</option>
+              <option value="questions.">Generation</option>
+              <option value="tier.">Tiers</option>
+              <option value="user.">Users</option>
+              <option value="password_change.">Failed password changes</option>
+            </select>
+          </div>
+        </form>
+        <div id="audit-table"></div>
+        <button type="button" class="btn-ghost" id="audit-more" hidden>Load more</button>
       </section>
       {% endif %}
     </div>
