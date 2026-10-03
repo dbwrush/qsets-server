@@ -4,14 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>QSets Admin</title>
+  <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body data-csrf="{{ csrf_token }}">
   {% include "_header.html" %}
 
   <main>
+    <section class="page-intro">
+      <p class="eyebrow">Administration</p>
+      <h1 class="page-title">Manage QSets</h1>
+    </section>
+
     <div class="panel">
-      <h2>Admin</h2>
 
       <nav class="admin-tabs">
         <button class="admin-tab active" data-tab="tab-pools">Pools</button>
@@ -24,7 +30,7 @@
 
       <!-- Pools tab -->
       <section class="admin-tab-content active" id="tab-pools">
-        <h3>Upload Pool CSV</h3>
+        <h3>Upload a pool</h3>
         <form id="upload-form" class="create-form">
           <div class="form-group">
             <label>Pool Name</label>
@@ -43,7 +49,7 @@
         </form>
         <div id="upload-status"></div>
 
-        <h3>Manage Pools</h3>
+        <h3>Your pools</h3>
         <p class="form-hint">Replacing a pool swaps in a new CSV and keeps its name and tier.</p>
         <input type="file" id="replace-file" accept=".csv" hidden />
         <div id="replace-status"></div>
@@ -53,7 +59,7 @@
       {% if is_admin %}
       <!-- Tiers tab -->
       <section class="admin-tab-content" id="tab-tiers">
-        <h3>Create Tier</h3>
+        <h3>Create a tier</h3>
         <form id="tier-form" class="create-form">
           <div class="form-group">
             <label>Name</label>
@@ -70,7 +76,7 @@
 
       <!-- Users tab -->
       <section class="admin-tab-content" id="tab-users">
-        <h3>Create User</h3>
+        <h3>Create a user</h3>
         <form id="user-form" class="create-form">
           <div class="form-group">
             <label>Username</label>
@@ -84,14 +90,14 @@
             <label for="user-tier">Tier</label>
             <select name="tier_id" id="user-tier" required></select>
           </div>
-          <div class="form-group">
+          <div class="form-group form-group-check">
             <label class="checkbox-label">
               <input name="is_admin" type="checkbox" /> Admin
             </label>
           </div>
-          <div class="form-group">
+          <div class="form-group form-group-check">
             <label class="checkbox-label">
-              <input name="can_upload_pools" type="checkbox" /> Can upload question pools
+              <input name="can_upload_pools" type="checkbox" /> Can upload pools
             </label>
           </div>
           <button type="submit" class="btn-primary">Create</button>
@@ -124,8 +130,8 @@
     </div>
   </main>
 
-  <footer class="footer">
-    Created by <a href="https://dbwrush.com" target="_blank">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank">Michael Parenti</a>
+  <footer class="site-footer">
+    <p>Created by <a href="https://dbwrush.com" target="_blank" rel="noopener">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank" rel="noopener">Michael Parenti</a></p>
   </footer>
 
   <script src="/static/header.js"></script>
