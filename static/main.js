@@ -1,7 +1,5 @@
 // Page values arrive as data attributes on <body>; the CSP does not allow inline scripts.
 window.QSETS_CSRF = document.body.dataset.csrf;
-window.QSETS_IS_AUTHENTICATED = document.body.dataset.authenticated === "true";
-window.QSETS_USERNAME = document.body.dataset.username || "";
 
 // API helper with CSRF support
 async function api(url, options = {}) {
@@ -36,7 +34,6 @@ function showStep(id) {
 
 // Init
 document.addEventListener("DOMContentLoaded", async () => {
-  initializeHeader();
   await loadPools();
 
   document.getElementById("downloadRTF")?.addEventListener("click", downloadRTF);
@@ -48,31 +45,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("backToStep2")?.addEventListener("click", () => showStep("step-2"));
   document.getElementById("backToStep3")?.addEventListener("click", () => showStep("step-3"));
 });
-
-function initializeHeader() {
-  const el = document.getElementById("user-status");
-  if (window.QSETS_IS_AUTHENTICATED) {
-    el.innerHTML = `
-      <span class="user-info">${escapeHtml(window.QSETS_USERNAME)}</span>
-      <a href="/account">Account</a>
-      <a href="#" id="logout-link">Logout</a>
-      <a href="/admin">Admin</a>
-    `;
-    document.getElementById("logout-link")?.addEventListener("click", handleLogout);
-  } else {
-    el.innerHTML = '<a href="/login">Login</a>';
-  }
-}
-
-async function handleLogout(e) {
-  e.preventDefault();
-  try {
-    await api("/api/logout", { method: "POST" });
-    window.location.href = "/";
-  } catch (err) {
-    console.error("Logout failed:", err);
-  }
-}
 
 // ── Pool Selection (table) ──
 async function loadPools() {

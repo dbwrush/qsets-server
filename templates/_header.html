@@ -1,0 +1,18 @@
+<header class="header">
+    <div class="header-left">
+      <a href="/"><h1>QSets</h1></a>
+    </div>
+    <div class="header-right">
+      <a href="https://qperf.dbwrush.com" class="nav-link">QPerformance</a>
+      <a href="https://qschedule.dbwrush.com" class="nav-link">QuizSchedule</a>
+      <a href="https://www.quizstuff.com" class="nav-link">QuizStuff</a>
+      {% if header.is_authenticated %}
+      <span class="user-info">{{ header.username }}</span>
+      <a href="/account">Account</a>
+      {% if header.can_access_admin %}<a href="/admin">Admin</a>{% endif %}
+      <a href="#" id="logout-link">Logout</a>
+      {% else %}
+      <a href="/login">Login</a>
+      {% endif %}
+    </div>
+  </header>
