@@ -16,17 +16,6 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, m => map[m]);
 }
 
-// ── Logout ──
-document.getElementById("logout-link")?.addEventListener("click", async (e) => {
-  e.preventDefault();
-  try {
-    await adminApi("/api/logout", { method: "POST" });
-    window.location.href = "/";
-  } catch (err) {
-    console.error("Logout failed:", err);
-  }
-});
-
 // ── Tab switching with auto-load ──
 const tabsLoaded = {};
 document.querySelectorAll(".admin-tab").forEach(tab => {

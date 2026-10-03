@@ -10,16 +10,6 @@ async function api(url, options = {}) {
   return data;
 }
 
-document.getElementById("logout-link")?.addEventListener("click", async (e) => {
-  e.preventDefault();
-  try {
-    await api("/api/logout", { method: "POST" });
-    window.location.href = "/";
-  } catch (err) {
-    console.error("Logout failed:", err);
-  }
-});
-
 document.getElementById("password-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.target;

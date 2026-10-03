@@ -822,3 +822,55 @@ async fn tiers_in_use_cannot_be_deleted(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }
+
+async fn header_html(app: &Router, uri: &str, session: Option<&str>) -> String {
+    let response = app.clone().oneshot(get(uri, session)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    let start = html.find("<header").expect("page has a header");
+    let end = html.find("</header>").expect("header closes");
+    html[start..end].to_string()
+}
+
+#[sqlx::test]
+async fn every_page_renders_the_same_header_for_the_same_visitor(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let admin = create_user(&pool, "the-admin", public, true, true).await;
+    let reader = create_user(&pool, "the-reader", public, false, false).await;
+    let admin_session = session(&pool, admin).await;
+    let reader_session = session(&pool, reader).await;
+
+    // Anonymous visitors can only reach / and /login.
+    let anonymous = header_html(&app, "/", None).await;
+    assert_eq!(header_html(&app, "/login", None).await, anonymous);
+    assert!(anonymous.contains(r#"href="/login""#));
+    assert!(!anonymous.contains("Logout"));
+
+    let admin_header = header_html(&app, "/", Some(&admin_session)).await;
+    for page in ["/login", "/account", "/admin"] {
+        assert_eq!(
+            header_html(&app, page, Some(&admin_session)).await,
+            admin_header,
+            "{page}"
+        );
+    }
+    for expected in [
+        "the-admin",
+        r#"href="/account""#,
+        r#"href="/admin""#,
+        "Logout",
+    ] {
+        assert!(admin_header.contains(expected), "missing {expected}");
+    }
+
+    // Users without admin or upload access do not see the Admin link, on any page.
+    let reader_header = header_html(&app, "/", Some(&reader_session)).await;
+    assert_eq!(
+        header_html(&app, "/account", Some(&reader_session)).await,
+        reader_header
+    );
+    assert!(reader_header.contains(r#"href="/account""#));
+    assert!(!reader_header.contains(r#"href="/admin""#));
+}
