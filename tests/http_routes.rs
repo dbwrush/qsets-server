@@ -879,3 +879,464 @@ async fn every_page_renders_the_same_header_for_the_same_visitor(pool: PgPool) {
     assert!(reader_header.contains(r#"href="/account""#));
     assert!(!reader_header.contains(r#"href="/admin""#));
 }
+
+// ── Accounts: registration, email verification, password reset ──
+
+use qsets_server::services::mail::CaptureMailer;
+use std::sync::Arc;
+
+fn mail_app(pool: &PgPool) -> (Router, Arc<CaptureMailer>) {
+    let mailer = Arc::new(CaptureMailer::default());
+    let state = AppState::new(pool.clone(), 2, false)
+        .with_mailer(mailer.clone())
+        .with_public_base_url("https://qsets.test/");
+    (qsets_server::app(state, "static"), mailer)
+}
+
+/// Emails are sent from background tasks, so wait until `count` have arrived.
+async fn wait_for_mail(
+    mailer: &CaptureMailer,
+    count: usize,
+) -> Vec<qsets_server::services::mail::SentMail> {
+    for _ in 0..100 {
+        let sent = mailer.sent();
+        if sent.len() >= count {
+            return sent;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("expected {count} emails, got {}", mailer.sent().len());
+}
+
+fn token_in(mail: &qsets_server::services::mail::SentMail) -> String {
+    let start = mail.body.find("token=").expect("mail has a link") + "token=".len();
+    mail.body[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect()
+}
+
+async fn post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    send(app, json_request(Method::POST, uri, None, body)).await
+}
+
+async fn register(app: &Router, username: &str, email: &str) -> (StatusCode, Value) {
+    post(
+        app,
+        "/api/register",
+        json!({"username": username, "email": email, "password": PASSWORD}),
+    )
+    .await
+}
+
+async fn login_as(app: &Router, identifier: &str, password: &str) -> (StatusCode, Value) {
+    post(
+        app,
+        "/api/login",
+        json!({"username": identifier, "password": password}),
+    )
+    .await
+}
+
+/// Registers and confirms an account, returning its mailer for further emails.
+async fn confirmed_account(
+    pool: &PgPool,
+    username: &str,
+    email: &str,
+) -> (Router, Arc<CaptureMailer>) {
+    let (app, mailer) = mail_app(pool);
+    assert_eq!(register(&app, username, email).await.0, StatusCode::OK);
+    let token = token_in(&wait_for_mail(&mailer, 1).await[0]);
+    let (status, _) = post(&app, "/api/email/verify", json!({"token": token})).await;
+    assert_eq!(status, StatusCode::OK);
+    (app, mailer)
+}
+
+#[sqlx::test]
+async fn registering_requires_confirming_the_email_before_signing_in(pool: PgPool) {
+    let (app, mailer) = mail_app(&pool);
+
+    let (status, _) = register(&app, "alice", "Alice@Example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let mail = wait_for_mail(&mailer, 1).await.remove(0);
+    assert_eq!(mail.to, "Alice@Example.com");
+    assert!(mail.body.contains("https://qsets.test/verify-email?token="));
+
+    let (status, body) = login_as(&app, "alice", PASSWORD).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["needs_verification"], true);
+    let (status, _) = login_as(&app, "alice@example.com", PASSWORD).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "unverified addresses cannot be used to sign in"
+    );
+
+    let token = token_in(&mail);
+    let (status, _) = post(&app, "/api/email/verify", json!({"token": token})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = post(&app, "/api/email/verify", json!({"token": token})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a link works once");
+
+    assert_eq!(login_as(&app, "alice", PASSWORD).await.0, StatusCode::OK);
+    assert_eq!(
+        login_as(&app, "ALICE@example.COM", PASSWORD).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_as(&app, "alice", "wrong password").await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let tier: i32 = sqlx::query_scalar(
+        "SELECT t.rank FROM users u JOIN tiers t ON t.id = u.tier_id WHERE username = 'alice'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tier, 0, "self-registered accounts get public access only");
+}
+
+#[sqlx::test]
+async fn registration_validates_input_and_rejects_taken_usernames(pool: PgPool) {
+    let (app, _mailer) = mail_app(&pool);
+
+    for (username, email) in [
+        ("ab", "a@b.co"),
+        ("a@b.co", "a@b.co"),
+        ("alice", "not-an-email"),
+    ] {
+        assert_eq!(
+            register(&app, username, email).await.0,
+            StatusCode::BAD_REQUEST,
+            "{username} {email}"
+        );
+    }
+    let (status, _) = post(
+        &app,
+        "/api/register",
+        json!({"username": "alice", "email": "a@b.co", "password": "short"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert_eq!(register(&app, "Alice", "a@b.co").await.0, StatusCode::OK);
+    assert_eq!(
+        register(&app, "alice", "other@b.co").await.0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[sqlx::test]
+async fn an_address_with_an_account_gets_a_notice_not_a_second_account(pool: PgPool) {
+    let (app, mailer) = confirmed_account(&pool, "alice", "alice@example.com").await;
+
+    let first = register(&app, "mallory", "alice@example.com").await;
+    assert_eq!(first.0, StatusCode::OK);
+    let sent = wait_for_mail(&mailer, 2).await;
+    assert!(sent[1].subject.contains("already has an account"));
+    assert!(!sent[1].body.contains("token="));
+
+    let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = 'mallory'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(accounts, 0);
+    // The caller sees the same answer as for a brand-new address.
+    let fresh = register(&app, "bob", "bob@example.com").await;
+    assert_eq!(first, fresh);
+}
+
+#[sqlx::test]
+async fn registration_can_be_closed(pool: PgPool) {
+    let state = AppState::new(pool.clone(), 2, false).with_registration_open(false);
+    let app = qsets_server::app(state, "static");
+    assert_eq!(
+        register(&app, "alice", "a@b.co").await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[sqlx::test]
+async fn forgotten_passwords_are_reset_through_an_emailed_link(pool: PgPool) {
+    let (app, mailer) = confirmed_account(&pool, "alice", "alice@example.com").await;
+    let user_id: i32 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let old_session = session(&pool, user_id).await;
+
+    let (status, requested) = post(
+        &app,
+        "/api/password-reset/request",
+        json!({"email": "ALICE@example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mail = wait_for_mail(&mailer, 2).await.remove(1);
+    assert!(mail
+        .body
+        .contains("https://qsets.test/reset-password?token="));
+    let token = token_in(&mail);
+
+    let (status, _) = post(
+        &app,
+        "/api/password-reset/confirm",
+        json!({"token": token, "new_password": "short"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = post(
+        &app,
+        "/api/password-reset/confirm",
+        json!({"token": "0".repeat(64), "new_password": "a brand new password"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = post(
+        &app,
+        "/api/password-reset/confirm",
+        json!({"token": token, "new_password": "a brand new password"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = post(
+        &app,
+        "/api/password-reset/confirm",
+        json!({"token": token, "new_password": "another new password"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a reset link works once");
+
+    assert_eq!(
+        login_as(&app, "alice", PASSWORD).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login_as(&app, "alice@example.com", "a brand new password")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, _) = send(&app, get("/api/me", Some(&old_session))).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "resetting signs out existing sessions"
+    );
+
+    // An address nobody owns gets the same answer and no email.
+    let (status, unknown) = post(
+        &app,
+        "/api/password-reset/request",
+        json!({"email": "nobody@example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unknown, requested);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(mailer.sent().len(), 2);
+}
+
+#[sqlx::test]
+async fn unconfirmed_addresses_cannot_be_used_to_reset_passwords(pool: PgPool) {
+    let (app, mailer) = mail_app(&pool);
+    register(&app, "alice", "alice@example.com").await;
+    wait_for_mail(&mailer, 1).await;
+
+    let (status, _) = post(
+        &app,
+        "/api/password-reset/request",
+        json!({"email": "alice@example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(mailer.sent().len(), 1);
+}
+
+#[sqlx::test]
+async fn resending_confirmation_mails_a_fresh_link_and_retires_the_old_one(pool: PgPool) {
+    let (app, mailer) = mail_app(&pool);
+    register(&app, "alice", "alice@example.com").await;
+    let first = token_in(&wait_for_mail(&mailer, 1).await[0]);
+
+    let (status, _) = post(
+        &app,
+        "/api/email/resend",
+        json!({"email": "alice@example.com"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = token_in(&wait_for_mail(&mailer, 2).await[1]);
+    assert_ne!(first, second);
+
+    let (status, _) = post(&app, "/api/email/verify", json!({"token": first})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = post(&app, "/api/email/verify", json!({"token": second})).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn email_requests_are_limited_per_address(pool: PgPool) {
+    let (app, _mailer) = mail_app(&pool);
+    for _ in 0..3 {
+        let (status, _) = post(
+            &app,
+            "/api/password-reset/request",
+            json!({"email": "a@b.co"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = post(
+        &app,
+        "/api/password-reset/request",
+        json!({"email": "A@b.co"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test]
+async fn changing_the_email_needs_the_password_and_confirmation_of_the_new_address(pool: PgPool) {
+    let (app, mailer) = confirmed_account(&pool, "alice", "old@example.com").await;
+    let user_id: i32 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let alice = session(&pool, user_id).await;
+    let change = |password: &str| {
+        json_request(
+            Method::POST,
+            "/api/me/email",
+            Some(&alice),
+            json!({"email": "new@example.com", "current_password": password}),
+        )
+    };
+
+    let (status, _) = send(&app, change("wrong password")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(&app, change(PASSWORD)).await;
+    assert_eq!(status, StatusCode::OK);
+    let mail = wait_for_mail(&mailer, 2).await.remove(1);
+    assert_eq!(mail.to, "new@example.com");
+
+    let (_, me) = send(&app, get("/api/me", Some(&alice))).await;
+    assert_eq!(
+        me["email"], "old@example.com",
+        "nothing changes until the link is opened"
+    );
+
+    let (status, _) = post(&app, "/api/email/verify", json!({"token": token_in(&mail)})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, me) = send(&app, get("/api/me", Some(&alice))).await;
+    assert_eq!(me["email"], "new@example.com");
+    assert_eq!(
+        login_as(&app, "new@example.com", PASSWORD).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_as(&app, "old@example.com", PASSWORD).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let (status, _) = send(&app, get("/api/me", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let anonymous = json_request(
+        Method::POST,
+        "/api/me/email",
+        None,
+        json!({"email": "x@y.co", "current_password": PASSWORD}),
+    );
+    assert_eq!(send(&app, anonymous).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test]
+async fn admin_set_emails_work_for_login_and_must_be_unique(pool: PgPool) {
+    let (app, _mailer) = mail_app(&pool);
+    let tier = public_tier(&pool).await;
+    let admin = create_user(&pool, "root", tier, true, true).await;
+    let admin = session(&pool, admin).await;
+    let create = |username: &str, email: &str| {
+        json_request(
+            Method::POST,
+            "/api/admin/users",
+            Some(&admin),
+            json!({"username": username, "password": PASSWORD, "tier_id": tier,
+                   "is_admin": false, "email": email}),
+        )
+    };
+
+    let (status, body) = send(&app, create("carol", "carol@example.com")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email_verified"], true);
+    assert_eq!(
+        login_as(&app, "carol@example.com", PASSWORD).await.0,
+        StatusCode::OK
+    );
+
+    let (status, _) = send(&app, create("dave", "CAROL@example.com")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = send(&app, create("a@b.co", "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+async fn sweep_removes_stale_unconfirmed_signups_but_keeps_everyone_else(pool: PgPool) {
+    let (app, mailer) = mail_app(&pool);
+    register(&app, "stale", "stale@example.com").await;
+    register(&app, "fresh", "fresh@example.com").await;
+    wait_for_mail(&mailer, 2).await;
+    let tier = public_tier(&pool).await;
+    create_user(&pool, "legacy", tier, false, false).await;
+    sqlx::query("UPDATE users SET created_at = NOW() - INTERVAL '4 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET created_at = NOW() WHERE username = 'fresh'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    qsets_server::services::accounts::sweep(&pool)
+        .await
+        .unwrap();
+
+    let names: Vec<String> = sqlx::query_scalar("SELECT username FROM users ORDER BY username")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(names, ["fresh", "legacy"]);
+}
+
+#[sqlx::test]
+async fn account_pages_render(pool: PgPool) {
+    let (app, mailer) = confirmed_account(&pool, "alice", "alice@example.com").await;
+    let _ = mailer;
+    let user_id: i32 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let alice = session(&pool, user_id).await;
+
+    for uri in [
+        "/register",
+        "/forgot-password",
+        "/reset-password",
+        "/verify-email",
+        "/login",
+    ] {
+        let response = app.clone().oneshot(get(uri, None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    let response = app
+        .clone()
+        .oneshot(get("/account", Some(&alice)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&bytes).contains("alice@example.com"));
+}

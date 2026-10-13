@@ -11,7 +11,7 @@ use axum::{
 use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 
 use crate::{
-    routes::{api, pages},
+    routes::{accounts, api, pages},
     state::AppState,
 };
 
@@ -29,6 +29,7 @@ fn security_header(name: HeaderName, value: &'static str) -> SetResponseHeaderLa
 pub fn app(state: AppState, static_dir: &str) -> Router {
     Router::new()
         .merge(api::router(state.clone()))
+        .merge(accounts::router(state.clone()))
         .merge(pages::router(state))
         .nest_service("/static", get_service(ServeDir::new(static_dir)))
         .layer(security_header(

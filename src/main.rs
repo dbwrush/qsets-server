@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use qsets_server::{
-    services::{audit, auth},
+    services::{accounts, audit, auth, mail},
     state::AppState,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -76,6 +76,28 @@ async fn main() {
             panic!("ADMIN_PASSWORD is too weak: {message}");
         }
     }
+    let public_base_url = match std::env::var("PUBLIC_BASE_URL") {
+        Ok(url) => url,
+        Err(_) if app_env == "development" => "http://localhost:3000".to_string(),
+        Err(_) => panic!(
+            "PUBLIC_BASE_URL is required outside the development environment; it is the \
+             address used in emailed links, e.g. https://qsets.example.com"
+        ),
+    };
+    let registration_open = std::env::var("ALLOW_REGISTRATION")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    let mailer: std::sync::Arc<dyn mail::Mailer> =
+        match mail::smtp_mailer_from_env().unwrap_or_else(|e| panic!("{e}")) {
+            Some(smtp) => std::sync::Arc::new(smtp),
+            None => {
+                tracing::warn!(
+                    "SMTP_HOST is not set: verification and reset emails are only written to \
+                     this log, so new accounts cannot confirm their address"
+                );
+                mail::default_mailer()
+            }
+        };
     let trust_proxy = std::env::var("TRUST_PROXY")
         .map(|v| v == "true")
         .unwrap_or(false);
@@ -135,6 +157,11 @@ async fn main() {
                 Ok(removed) => tracing::debug!(removed, "deleted expired sessions"),
                 Err(error) => tracing::warn!(error = %error, "failed to delete expired sessions"),
             }
+            match accounts::sweep(&sweep_pool).await {
+                Ok(0) => {}
+                Ok(removed) => tracing::debug!(removed, "deleted expired tokens and signups"),
+                Err(error) => tracing::warn!(error = %error, "failed to sweep email tokens"),
+            }
             if audit_retention_days > 0 {
                 match audit::delete_older_than(&sweep_pool, audit_retention_days).await {
                     Ok(0) => {}
@@ -147,7 +174,10 @@ async fn main() {
         }
     });
 
-    let state = AppState::new(pool, generation_concurrency, trust_proxy);
+    let state = AppState::new(pool, generation_concurrency, trust_proxy)
+        .with_mailer(mailer)
+        .with_public_base_url(&public_base_url)
+        .with_registration_open(registration_open);
     let app = qsets_server::app(state, &static_dir);
 
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");

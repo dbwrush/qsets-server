@@ -18,7 +18,7 @@ use super::common::{
 use crate::{
     models::{QuestionPool, Tier, User},
     services::{
-        audit, auth,
+        accounts, audit, auth,
         authz::{self, Actor, PoolAccess},
         generator,
         security::ClientMeta,
@@ -131,6 +131,8 @@ async fn parsed_pool(
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
+    /// A username, or the verified email address of an account.
+    #[serde(alias = "identifier")]
     username: String,
     password: String,
 }
@@ -150,9 +152,12 @@ async fn login(
     }
 
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE username = $1",
+        "SELECT id, username, password_hash, email, email_verified_at, is_admin, can_upload_pools, tier_id, created_at FROM users
+         WHERE username = $1 OR (email_verified_at IS NOT NULL AND lower(email) = lower($1))
+         ORDER BY (username = $1) DESC
+         LIMIT 1",
     )
-    .bind(&payload.username)
+    .bind(payload.username.trim())
     .fetch_optional(&state.pool)
     .await
     .map_err(db_error("Failed to look up user"))?;
@@ -185,6 +190,15 @@ async fn login(
             ));
         }
     };
+
+    // A signup that never confirmed its address cannot sign in; the password was right, so it is
+    // safe to say why.
+    if user.email.is_some() && user.email_verified_at.is_none() {
+        return Err(ApiError::forbidden(
+            "Confirm your email address first; check your inbox for the verification link",
+        )
+        .with_details(json!({"needs_verification": true})));
+    }
 
     throttle.record_success(&payload.username, &client.ip);
     let token = auth::create_session(&state.pool, user.id)
@@ -233,7 +247,7 @@ async fn logout(State(state): State<AppState>, client: ClientMeta, jar: CookieJa
 async fn me(State(state): State<AppState>, actor: Actor) -> ApiResult {
     let user_id = require_user(&actor)?;
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE id = $1",
+        "SELECT id, username, password_hash, email, email_verified_at, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE id = $1",
     )
     .bind(user_id)
     .fetch_one(&state.pool)
@@ -243,6 +257,8 @@ async fn me(State(state): State<AppState>, actor: Actor) -> ApiResult {
     ok(json!({
         "id": user.id,
         "username": user.username,
+        "email": user.email,
+        "email_verified": user.email_verified_at.is_some(),
         "is_admin": user.is_admin,
         "can_upload_pools": user.can_upload_pools,
         "tier_id": user.tier_id,
@@ -872,6 +888,19 @@ struct CreateUserBody {
     is_admin: bool,
     #[serde(default)]
     can_upload_pools: bool,
+    /// Optional; counts as verified, since the admin is vouching for it.
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// Normalizes an admin-supplied address: blank means none.
+fn admin_email(email: Option<&str>) -> ApiResult<Option<String>> {
+    match email.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(email) => accounts::validate_email(email)
+            .map(Some)
+            .map_err(ApiError::bad_request),
+        None => Ok(None),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -882,11 +911,18 @@ struct UpdateUserBody {
     #[serde(default)]
     can_upload_pools: bool,
     password: Option<String>,
+    /// Absent leaves the address alone; blank removes it. An address set here counts as
+    /// verified, since the admin is vouching for it.
+    email: Option<String>,
 }
 
 fn user_write_error(message: &'static str) -> impl FnOnce(sqlx::Error) -> ApiError {
     move |error| {
-        if is_unique_violation(&error) {
+        if matches!(&error, sqlx::Error::Database(db)
+            if db.constraint() == Some("idx_users_verified_email"))
+        {
+            ApiError::conflict("That email address is already in use")
+        } else if is_unique_violation(&error) {
             ApiError::conflict("That username is already taken")
         } else if is_foreign_key_violation(&error) {
             ApiError::bad_request("Unknown tier")
@@ -900,6 +936,8 @@ fn user_json(user: &User) -> Value {
     json!({
         "id": user.id,
         "username": user.username,
+        "email": user.email,
+        "email_verified": user.email_verified_at.is_some(),
         "tier_id": user.tier_id,
         "is_admin": user.is_admin,
         "can_upload_pools": user.can_upload_pools,
@@ -908,7 +946,7 @@ fn user_json(user: &User) -> Value {
 
 async fn list_users(State(state): State<AppState>, _admin: Admin) -> ApiResult {
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at FROM users ORDER BY created_at DESC",
+        "SELECT id, username, password_hash, email, email_verified_at, is_admin, can_upload_pools, tier_id, created_at FROM users ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
     .await
@@ -935,21 +973,27 @@ async fn create_user(
     if username.is_empty() {
         return Err(ApiError::bad_request("Username must not be empty"));
     }
+    if username.contains('@') {
+        return Err(ApiError::bad_request("Username must not contain '@'"));
+    }
+    let email = admin_email(body.email.as_deref())?;
     auth::validate_password(&body.password).map_err(ApiError::bad_request)?;
     let password_hash = auth::hash_password_blocking(body.password)
         .await
         .map_err(|_| ApiError::internal("Failed to hash password"))?;
 
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (username, password_hash, tier_id, is_admin, can_upload_pools)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
+        "INSERT INTO users (username, password_hash, tier_id, is_admin, can_upload_pools,
+                            email, email_verified_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6::text IS NULL THEN NULL ELSE NOW() END)
+         RETURNING id, username, password_hash, email, email_verified_at, is_admin, can_upload_pools, tier_id, created_at",
     )
     .bind(username)
     .bind(password_hash)
     .bind(body.tier_id)
     .bind(body.is_admin)
     .bind(body.can_upload_pools)
+    .bind(email)
     .fetch_one(&state.pool)
     .await
     .map_err(user_write_error("Failed to create user"))?;
@@ -986,6 +1030,11 @@ async fn update_user(
         return Err(ApiError::bad_request("Username must not be empty"));
     }
 
+    let email = match body.email.as_deref() {
+        Some(_) => Some(admin_email(body.email.as_deref())?),
+        None => None,
+    };
+
     // A blank password field in the admin UI means "leave unchanged".
     let password_hash = match body.password.as_deref().filter(|p| !p.trim().is_empty()) {
         Some(password) => {
@@ -1004,6 +1053,7 @@ async fn update_user(
         id,
         username,
         &body,
+        email,
         password_hash,
         auth::session_token(&jar),
     )
@@ -1034,6 +1084,7 @@ async fn update_user_record(
     id: i32,
     username: &str,
     body: &UpdateUserBody,
+    email: Option<Option<String>>,
     password_hash: Option<String>,
     current_session: Option<uuid::Uuid>,
 ) -> Result<Option<User>, sqlx::Error> {
@@ -1043,9 +1094,15 @@ async fn update_user_record(
     let updated = sqlx::query_as::<_, User>(
         "UPDATE users
          SET username = $1, tier_id = $2, is_admin = $3, can_upload_pools = $4,
-             password_hash = COALESCE($5, password_hash)
+             password_hash = COALESCE($5, password_hash),
+             email = CASE WHEN $7 THEN $8 ELSE email END,
+             email_verified_at = CASE
+                 WHEN NOT $7 THEN email_verified_at
+                 WHEN $8::text IS NULL THEN NULL
+                 WHEN lower($8) = lower(email) THEN email_verified_at
+                 ELSE NOW() END
          WHERE id = $6
-         RETURNING id, username, password_hash, is_admin, can_upload_pools, tier_id, created_at",
+         RETURNING id, username, password_hash, email, email_verified_at, is_admin, can_upload_pools, tier_id, created_at",
     )
     .bind(username)
     .bind(body.tier_id)
@@ -1053,6 +1110,8 @@ async fn update_user_record(
     .bind(body.can_upload_pools)
     .bind(password_hash)
     .bind(id)
+    .bind(email.is_some())
+    .bind(email.flatten())
     .fetch_optional(&mut *tx)
     .await?;
 

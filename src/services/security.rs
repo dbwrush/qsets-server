@@ -206,6 +206,67 @@ impl LoginThrottle {
     }
 }
 
+/// Allows `limit` events per key in a fixed window that starts at the key's first event. Used to
+/// stop the account forms from being turned into an email-sending service.
+#[derive(Debug)]
+pub struct RateLimiter {
+    limit: u32,
+    window: Duration,
+    state: Mutex<RateWindows>,
+}
+
+#[derive(Debug, Default)]
+struct RateWindows {
+    windows: HashMap<String, FailureWindow>,
+    last_prune: Option<Instant>,
+}
+
+impl RateLimiter {
+    pub fn new(limit: u32, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            state: Mutex::default(),
+        }
+    }
+
+    /// Counts an event for `key` and returns whether it is within the limit. Callers should
+    /// check a coarser key (such as the client address) first, so the number of keys held here
+    /// stays bounded by what one client can create.
+    pub fn allow(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .last_prune
+            .is_none_or(|last| now.duration_since(last) >= PRUNE_INTERVAL)
+        {
+            let window = self.window;
+            state
+                .windows
+                .retain(|_, w| now.duration_since(w.started) <= window);
+            state.last_prune = Some(now);
+        }
+        let entry = state
+            .windows
+            .entry(key.to_string())
+            .or_insert(FailureWindow {
+                started: now,
+                count: 0,
+            });
+        if now.duration_since(entry.started) > self.window {
+            *entry = FailureWindow {
+                started: now,
+                count: 0,
+            };
+        }
+        if entry.count >= self.limit {
+            return false;
+        }
+        entry.count += 1;
+        true
+    }
+}
+
 pub fn ensure_csrf_cookie(jar: CookieJar) -> (CookieJar, String) {
     if let Some(v) = jar.get(CSRF_COOKIE).map(|c| c.value().to_string()) {
         return (jar, v);
@@ -290,6 +351,15 @@ mod tests {
             state.failures(&ThrottleKey::Client("10.0.0.1".into()), now),
             MAX_FAILURES_PER_ACCOUNT_AND_CLIENT
         );
+    }
+
+    #[test]
+    fn rate_limiter_allows_up_to_the_limit_per_key() {
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        assert!(limiter.allow("a"));
+        assert!(limiter.allow("a"));
+        assert!(!limiter.allow("a"));
+        assert!(limiter.allow("b"));
     }
 
     fn csrf_jar(value: &str) -> CookieJar {
