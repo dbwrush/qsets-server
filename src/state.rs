@@ -4,13 +4,18 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tokio::sync::{RwLock, Semaphore};
 
-use crate::services::{generator::QuestionRecord, security::LoginThrottle};
+use crate::services::{
+    generator::QuestionRecord,
+    mail::{self, Mailer},
+    security::{LoginThrottle, RateLimiter},
+};
 
 const MAX_CACHED_POOLS: usize = 16;
 
@@ -83,7 +88,22 @@ pub struct AppState {
     /// Whether to believe `X-Forwarded-For`. Only enable behind a reverse proxy that sets it.
     pub trust_proxy: bool,
     pub login_throttle: Arc<LoginThrottle>,
+    pub mailer: Arc<dyn Mailer>,
+    /// Origin used in emailed links, e.g. `https://qsets.example.com`. Configured rather than read
+    /// from the request, because a forged `Host` header must not decide where reset links point.
+    pub public_base_url: String,
+    /// Whether anyone may create an account without an admin.
+    pub registration_open: bool,
+    /// Email-sending requests per client address.
+    pub email_client_limiter: Arc<RateLimiter>,
+    /// Email-sending requests per destination address, so one inbox cannot be flooded from many
+    /// clients.
+    pub email_address_limiter: Arc<RateLimiter>,
 }
+
+const EMAIL_WINDOW: Duration = Duration::from_secs(60 * 60);
+const EMAILS_PER_CLIENT: u32 = 10;
+const EMAILS_PER_ADDRESS: u32 = 3;
 
 impl AppState {
     pub fn new(pool: PgPool, generation_concurrency: usize, trust_proxy: bool) -> Self {
@@ -93,7 +113,27 @@ impl AppState {
             generation_slots: Arc::new(Semaphore::new(generation_concurrency)),
             trust_proxy,
             login_throttle: Arc::default(),
+            mailer: mail::default_mailer(),
+            public_base_url: "http://localhost:3000".to_string(),
+            registration_open: true,
+            email_client_limiter: Arc::new(RateLimiter::new(EMAILS_PER_CLIENT, EMAIL_WINDOW)),
+            email_address_limiter: Arc::new(RateLimiter::new(EMAILS_PER_ADDRESS, EMAIL_WINDOW)),
         }
+    }
+
+    pub fn with_mailer(mut self, mailer: Arc<dyn Mailer>) -> Self {
+        self.mailer = mailer;
+        self
+    }
+
+    pub fn with_public_base_url(mut self, url: &str) -> Self {
+        self.public_base_url = url.trim_end_matches('/').to_string();
+        self
+    }
+
+    pub fn with_registration_open(mut self, open: bool) -> Self {
+        self.registration_open = open;
+        self
     }
 }
 

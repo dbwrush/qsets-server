@@ -7,6 +7,8 @@ pub struct User {
     pub id: i32,
     pub username: String,
     pub password_hash: String,
+    pub email: Option<String>,
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub is_admin: bool,
     pub can_upload_pools: bool,
     pub tier_id: i32,

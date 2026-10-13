@@ -43,3 +43,32 @@ document.getElementById("password-form")?.addEventListener("submit", async (e) =
     button.disabled = false;
   }
 });
+
+document.getElementById("email-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const status = document.getElementById("email-status");
+  const button = form.querySelector('button[type="submit"]');
+
+  button.disabled = true;
+  status.textContent = "Sending…";
+  status.className = "login-status";
+  try {
+    const data = await api("/api/me/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: form.email.value,
+        current_password: form.current_password.value,
+      }),
+    });
+    form.reset();
+    status.textContent = data.message;
+    status.className = "login-status success";
+  } catch (err) {
+    status.textContent = `Error: ${err.message}`;
+    status.className = "login-status error";
+  } finally {
+    button.disabled = false;
+  }
+});

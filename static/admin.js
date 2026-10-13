@@ -298,14 +298,20 @@ async function loadUsers() {
   }
 }
 
+function emailLabel(u) {
+  if (!u.email) return "—";
+  return escapeHtml(u.email) + (u.email_verified ? "" : " (unconfirmed)");
+}
+
 function renderUsersTable(users, container) {
   if (!users.length) { container.innerHTML = '<p class="msg-info">No users found.</p>'; return; }
   let html = `<table class="data-table">
-    <thead><tr><th>ID</th><th>Username</th><th>Tier</th><th>Admin</th><th>Can Upload</th><th></th></tr></thead><tbody>`;
+    <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Tier</th><th>Admin</th><th>Can Upload</th><th></th></tr></thead><tbody>`;
   users.forEach(u => {
-    html += `<tr data-id="${u.id}" data-tier="${u.tier_id}" data-admin="${u.is_admin}" data-upload="${u.can_upload_pools}">
+    html += `<tr data-id="${u.id}" data-tier="${u.tier_id}" data-admin="${u.is_admin}" data-upload="${u.can_upload_pools}" data-email="${escapeHtml(u.email || "")}">
       <td>${u.id}</td>
       <td class="cell-username">${escapeHtml(u.username)}</td>
+      <td class="cell-email">${emailLabel(u)}</td>
       <td class="cell-tier">${escapeHtml(tierNameById(u.tier_id))}</td>
       <td class="cell-admin">${u.is_admin ? "Yes" : "No"}</td>
       <td class="cell-upload">${u.can_upload_pools ? "Yes" : "No"}</td>
@@ -329,18 +335,22 @@ function renderUsersTable(users, container) {
 function startEditUser(row) {
   const id = row.dataset.id;
   const usernameCell = row.querySelector(".cell-username");
+  const emailCell = row.querySelector(".cell-email");
   const tierCell = row.querySelector(".cell-tier");
   const adminCell = row.querySelector(".cell-admin");
   const uploadCell = row.querySelector(".cell-upload");
   const actionsCell = row.querySelector(".admin-actions");
 
   const oldUsername = usernameCell.textContent;
+  const oldEmailHtml = emailCell.innerHTML;
+  const oldEmail = row.dataset.email;
   const oldTierId = row.dataset.tier;
   const oldTierLabel = tierCell.textContent;
   const oldAdmin = row.dataset.admin === "true";
   const oldUpload = row.dataset.upload === "true";
 
   usernameCell.innerHTML = `<input type="text" class="edit-username" value="${escapeHtml(oldUsername)}" />`;
+  emailCell.innerHTML = `<input type="email" class="edit-email" value="${escapeHtml(oldEmail)}" />`;
   tierCell.innerHTML = `<select class="edit-tier">${tierOptionsHtml(allTiers, oldTierId)}</select>`;
   adminCell.innerHTML = `<input type="checkbox" class="edit-admin" ${oldAdmin ? "checked" : ""} />`;
   uploadCell.innerHTML = `<input type="checkbox" class="edit-upload" ${oldUpload ? "checked" : ""} />`;
@@ -351,6 +361,7 @@ function startEditUser(row) {
 
   actionsCell.querySelector(".save-user").addEventListener("click", async () => {
     const username = row.querySelector(".edit-username").value.trim();
+    const email = row.querySelector(".edit-email").value.trim();
     const tier_id = Number(row.querySelector(".edit-tier").value);
     const is_admin = row.querySelector(".edit-admin").checked;
     const can_upload_pools = row.querySelector(".edit-upload").checked;
@@ -358,7 +369,7 @@ function startEditUser(row) {
       await adminApi(`/api/admin/users/${id}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username, password: null, tier_id, is_admin, can_upload_pools }),
+        body: JSON.stringify({ username, email, password: null, tier_id, is_admin, can_upload_pools }),
       });
       tabsLoaded.users = false;
       loadUsers();
@@ -369,6 +380,7 @@ function startEditUser(row) {
 
   actionsCell.querySelector(".cancel-user").addEventListener("click", () => {
     usernameCell.textContent = oldUsername;
+    emailCell.innerHTML = oldEmailHtml;
     tierCell.textContent = oldTierLabel;
     adminCell.textContent = oldAdmin ? "Yes" : "No";
     uploadCell.textContent = oldUpload ? "Yes" : "No";
@@ -404,6 +416,7 @@ document.getElementById("user-form")?.addEventListener("submit", async (e) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         username: fd.get("username").trim(),
+        email: fd.get("email").trim(),
         password: fd.get("password"),
         tier_id: Number(fd.get("tier_id")),
         is_admin: fd.get("is_admin") === "on",

@@ -20,6 +20,12 @@ Rust/Axum + Askama web server for Nazarene Bible quizzing question pools with ti
   for 15 minutes, which is why it is set much higher than the others)
 - Self-service password change at `/account`; any password change signs the user out of
   their other sessions
+- Self-service accounts at `/register` (username, email, password). New accounts get public
+  access until an admin raises their tier, and must confirm their email address before signing in
+- Sign in with a username or a confirmed email address
+- Forgot-password links by email (`/forgot-password`); a reset signs the account out everywhere.
+  Verification and reset requests answer identically whether or not the address has an account,
+  are rate limited per client and per address, and use single-use tokens stored only as hashes
 - Content-Security-Policy and related security headers on every response
 - Tier-based pool visibility with inherited lower-tier access
 - Admin endpoints and UI for pool upload, replacement and deletion, tier creation, and user creation
@@ -53,6 +59,14 @@ Copy `.env.example` to `.env`, then optionally add an environment-specific overr
   forge it to dodge login throttling and falsify audit-log IPs.
 - `AUDIT_RETENTION_DAYS` (default `365`): audit entries older than this are deleted by an
   hourly sweep. `0` keeps them forever.
+- `PUBLIC_BASE_URL`: origin used in emailed links, e.g. `https://qsets.example.com`. Required
+  outside `development`; it is configured rather than taken from the request so a forged `Host`
+  header cannot redirect reset links.
+- `SMTP_HOST`, `SMTP_FROM`, and optionally `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+  `SMTP_TLS` (`starttls` default, `tls`, or `none`): outgoing email. Without `SMTP_HOST`, emails
+  are only written to the server log, which suits development but means nobody can confirm an
+  address.
+- `ALLOW_REGISTRATION` (default `true`): set `false` to close self-service sign-up.
 - `STATIC_DIR` (default `static`): location of the CSS/JS assets. Relative paths resolve
   against the working directory; templates are compiled into the binary.
 
@@ -102,6 +116,16 @@ existing username is promoted to admin with the new password instead of failing.
 
 Passwords must be at least 8 characters, whether set by this script, the admin page,
 or `ADMIN_PASSWORD` outside the `development` profile.
+
+### Accounts and email
+
+Accounts created before email support have no address. Their owners can add one on `/account`
+(it takes effect once its link is opened), or an admin can set one on the Users tab; an address an
+admin sets counts as confirmed. Accounts without a confirmed address cannot use password reset.
+
+Only confirmed addresses are unique and usable for sign-in or reset, so registering someone
+else's address does not block them. Sign-ups that never confirm are deleted after 3 days.
+Usernames chosen at registration cannot contain `@`, so a username is never mistaken for an email.
 
 ### Tiers
 
