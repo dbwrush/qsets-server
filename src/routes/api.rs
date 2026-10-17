@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pools/:id/books", get(pool_books))
         .route("/api/tiers", get(list_assignable_tiers))
         .route("/api/generate", post(generate))
+        .route("/api/generate/validate", post(validate_custom_generation))
         .route("/api/admin/tiers", get(list_tiers).post(create_tier))
         .route("/api/admin/tiers/:id", put(update_tier).delete(delete_tier))
         .route("/api/admin/users", get(list_users).post(create_user))
@@ -637,10 +638,51 @@ struct GenerateBody {
     count: usize,
     situation: Option<bool>,
     seed: Option<u64>,
+    custom_counts: Option<generator::CustomCounts>,
     books: Option<Vec<generator::BookFilter>>,
     /// Number of sets to generate; set `i` uses `seed + i` so a seed reproduces every set.
     #[serde(default = "one_set")]
     sets: usize,
+}
+
+async fn validate_custom_generation(
+    State(state): State<AppState>,
+    actor: Actor,
+    Json(body): Json<GenerateBody>,
+) -> ApiResult {
+    if !body.question_type.eq_ignore_ascii_case("custom") {
+        return Err(ApiError::bad_request("Validation requires Custom mode"));
+    }
+    let counts = body
+        .custom_counts
+        .ok_or_else(|| ApiError::bad_request("Custom generation requires custom_counts"))?;
+    let filters = body.books.unwrap_or_default();
+    if filters.is_empty() {
+        return Err(ApiError::bad_request("Select at least one book"));
+    }
+    let source_pool = authorize_pool_access(&state, &actor, body.pool_id).await?;
+    let parsed = parsed_pool(&state, &source_pool).await?;
+    let permit = state
+        .generation_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Question generation is unavailable",
+            )
+        })?;
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let filtered = generator::filter_by_books_cow(&parsed, &filters);
+        let available = generator::available_type_counts(&filtered);
+        let error = generator::generate_custom_set(&filtered, &counts, Some(0)).err();
+        json!({"valid": error.is_none(), "error": error, "available": available})
+    })
+    .await
+    .map_err(|_| ApiError::internal("Question validation failed"))?;
+    ok(result)
 }
 
 async fn generate(
@@ -682,6 +724,12 @@ async fn generate(
         seed: body.seed,
     };
     let set_count = body.sets;
+    let custom_counts = body.custom_counts;
+    if !req.question_type.eq_ignore_ascii_case("custom") && custom_counts.is_some() {
+        return Err(ApiError::bad_request(
+            "custom_counts is only supported in Custom mode",
+        ));
+    }
     let generation_permit = state
         .generation_slots
         .clone()
@@ -705,12 +753,20 @@ async fn generate(
                     seed: req.seed.map(|seed| seed.wrapping_add(i as u64)),
                     ..req.clone()
                 };
-                generator::generate_questions(pool, &set_req)
+                if set_req.question_type.eq_ignore_ascii_case("custom") {
+                    let counts = custom_counts
+                        .as_ref()
+                        .ok_or_else(|| "Custom generation requires custom_counts".to_string())?;
+                    generator::generate_custom_set(pool, counts, set_req.seed)
+                } else {
+                    generator::generate_questions(pool, &set_req)
+                }
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, _>>()
     })
     .await
-    .map_err(|_| ApiError::internal("Question generation failed"))?;
+    .map_err(|_| ApiError::internal("Question generation failed"))?
+    .map_err(ApiError::bad_request)?;
 
     audit::record(
         &state.pool,

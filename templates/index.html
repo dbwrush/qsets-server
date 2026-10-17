@@ -6,14 +6,14 @@
   <title>QSets — Bible Quiz Question Set Generator</title>
   <script src="/static/theme.js"></script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=custom-feedback-1" />
 </head>
 <body data-csrf="{{ csrf_token }}">
   {% include "_header.html" %}
 
   <main>
     <section class="page-intro">
-      <p class="eyebrow">Bible quizquestion set generator</p>
+      <p class="eyebrow">Bible quiz question set generator</p>
       <h1 class="page-title">Build question sets</h1>
       <p class="lede">Pick a question pool, choose the passages in play, and generate sets ready to read aloud or print.</p>
     </section>
@@ -73,14 +73,32 @@
                 <input type="radio" name="questionType" value="inWhatBook" />
                 <span class="radio-label">In What Book &amp; Chapter</span>
               </label>
+              <label class="radio-option">
+                <input type="radio" name="questionType" value="custom" aria-controls="customOptions" />
+                <span class="radio-label">Custom</span>
+              </label>
             </div>
           </div>
         </div>
+        <fieldset id="customOptions" hidden disabled>
+          <legend>Questions of each type</legend>
+          <p>Choose a count for each type; use zero to leave a type out. Each set must have at least one question.</p>
+          <div class="options-grid" id="customCounts">
+            {% for qtype in ["According-To", "General", "In-What-Book-and-Chapter", "Quote", "Reference", "Situation", "Context", "Verse"] %}
+            <div class="form-group">
+              <label for="customCount{{ loop.index0 }}">{{ qtype }}</label>
+              <input type="number" id="customCount{{ loop.index0 }}" data-question-type="{{ qtype }}" min="0" step="1" value="0" required aria-describedby="customAvailable{{ loop.index0 }}" />
+              <small id="customAvailable{{ loop.index0 }}" class="custom-availability">0 requested / checking availability</small>
+            </div>
+            {% endfor %}
+          </div>
+          <p id="customValidation" role="status"></p>
+        </fieldset>
         <div class="wizard-nav">
           <button type="button" class="btn-ghost" id="backToStep2">Back</button>
           <button type="button" class="btn-primary" id="generateBtn">Generate sets</button>
         </div>
-        <div id="generateStatus"></div>
+        <div id="generateStatus" role="status"></div>
       </div>
 
       <!-- Step 4: Results -->
@@ -115,11 +133,17 @@
     </div>
   </main>
 
+  <dialog id="generationError" aria-labelledby="generationErrorTitle" aria-describedby="generationErrorMessage">
+    <h2 id="generationErrorTitle">Unable to generate sets</h2>
+    <p id="generationErrorMessage"></p>
+    <form method="dialog"><button class="btn-primary" autofocus>OK</button></form>
+  </dialog>
+
   <footer class="site-footer">
     <p>Created by <a href="https://dbwrush.com" target="_blank" rel="noopener">David Rush</a> &amp; <a href="https://msparenti.com" target="_blank" rel="noopener">Michael Parenti</a></p>
   </footer>
 
   <script src="/static/header.js"></script>
-  <script src="/static/main.js"></script>
+  <script src="/static/main.js?v=custom-feedback-2"></script>
 </body>
 </html>
