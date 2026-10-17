@@ -58,6 +58,7 @@ async function loadAssignableTiers() {
     if (select) select.innerHTML = tierOptionsHtml(assignableTiers);
   } catch (err) {
     if (select) select.innerHTML = "";
+    document.getElementById("pool-upload-area").open = true;
     document.getElementById("upload-status").innerHTML = `<p class="msg-error">Failed to load tiers: ${escapeHtml(err.message)}</p>`;
     console.error("Failed to load tiers:", err);
   }
@@ -115,7 +116,7 @@ async function loadManagedPools() {
 function renderPoolsTable(pools, container) {
   if (!pools.length) { container.innerHTML = '<p class="msg-info">No pools you can manage.</p>'; return; }
   let html = `<table class="data-table">
-    <thead><tr><th>Name</th><th>Tier</th><th>Uploaded by</th><th>Last updated</th><th></th></tr></thead><tbody>`;
+    <thead><tr><th>Name</th><th>Tier</th><th>Uploaded by</th><th>Last updated</th><th>Actions</th></tr></thead><tbody>`;
   pools.forEach(p => {
     html += `<tr data-id="${p.id}" data-name="${escapeHtml(p.name)}">
       <td>${escapeHtml(p.name)}</td>
@@ -123,9 +124,9 @@ function renderPoolsTable(pools, container) {
       <td>${escapeHtml(p.created_by_username || "Unknown / deleted user")}</td>
       <td>${escapeHtml(new Date(p.updated_at).toLocaleString())}</td>
       <td class="admin-actions">
-        <a href="/pools/${p.id}/edit">Edit</a>
-        <button class="btn-icon replace-pool" title="Replace CSV">&#8635;</button>
-        ${p.can_manage ? '<button class="btn-icon danger delete-pool" title="Delete">&#128465;</button>' : ""}
+        <a class="btn" href="/pools/${p.id}/edit">Edit</a>
+        <button class="btn-icon replace-pool" title="Replace CSV" aria-label="Replace CSV">&#8635;</button>
+        ${p.can_manage ? '<button class="btn-icon danger delete-pool" title="Delete" aria-label="Delete pool">&#128465;</button>' : ""}
       </td>
     </tr>`;
   });
@@ -191,7 +192,7 @@ async function loadTiers() {
 function renderTiersTable(tiers, container) {
   if (!tiers.length) { container.innerHTML = '<p class="msg-info">No tiers found.</p>'; return; }
   let html = `<table class="data-table">
-    <thead><tr><th>ID</th><th>Name</th><th>Rank</th><th></th></tr></thead><tbody>`;
+    <thead><tr><th>ID</th><th>Name</th><th>Rank</th><th>Actions</th></tr></thead><tbody>`;
   tiers.forEach(t => {
     html += `<tr data-id="${t.id}">
       <td>${t.id}</td>
@@ -199,8 +200,8 @@ function renderTiersTable(tiers, container) {
       <td class="cell-rank">${t.rank}</td>
       <td class="admin-actions">
         ${t.rank === -1 ? '<span class="form-hint">Built-in (pools only)</span>' : `
-        <button class="btn-icon edit-tier" title="Edit">&#9998;</button>
-        <button class="btn-icon danger delete-tier" title="Delete">&#128465;</button>`}
+        <button class="btn-icon edit-tier" title="Edit" aria-label="Edit tier">&#9998;</button>
+        <button class="btn-icon danger delete-tier" title="Delete" aria-label="Delete tier">&#128465;</button>`}
       </td>
     </tr>`;
   });
@@ -224,11 +225,11 @@ function startEditTier(row) {
   const oldName = nameCell.textContent;
   const oldRank = rankCell.textContent;
 
-  nameCell.innerHTML = `<input type="text" class="edit-name" value="${escapeHtml(oldName)}" />`;
-  rankCell.innerHTML = `<input type="number" class="edit-rank" value="${oldRank}" min="0" />`;
+  nameCell.innerHTML = `<input type="text" class="edit-name" aria-label="Tier name" value="${escapeHtml(oldName)}" />`;
+  rankCell.innerHTML = `<input type="number" class="edit-rank" aria-label="Tier rank" value="${oldRank}" min="0" />`;
   actionsCell.innerHTML = `
-    <button class="btn-icon save-tier" title="Save">&#10003;</button>
-    <button class="btn-icon danger cancel-tier" title="Cancel">&#10005;</button>
+    <button class="btn-icon save-tier" title="Save" aria-label="Save tier">&#10003;</button>
+    <button class="btn-icon cancel-tier" title="Cancel" aria-label="Cancel tier edit">&#10005;</button>
   `;
 
   actionsCell.querySelector(".save-tier").addEventListener("click", async () => {
@@ -251,8 +252,8 @@ function startEditTier(row) {
     nameCell.textContent = oldName;
     rankCell.textContent = oldRank;
     actionsCell.innerHTML = `
-      <button class="btn-icon edit-tier" title="Edit">&#9998;</button>
-      <button class="btn-icon danger delete-tier" title="Delete">&#128465;</button>
+      <button class="btn-icon edit-tier" title="Edit" aria-label="Edit tier">&#9998;</button>
+      <button class="btn-icon danger delete-tier" title="Delete" aria-label="Delete tier">&#128465;</button>
     `;
     actionsCell.querySelector(".edit-tier").addEventListener("click", () => startEditTier(row));
     actionsCell.querySelector(".delete-tier").addEventListener("click", () => deleteTier(row));
@@ -312,7 +313,7 @@ function emailLabel(u) {
 function renderUsersTable(users, container) {
   if (!users.length) { container.innerHTML = '<p class="msg-info">No users found.</p>'; return; }
   let html = `<table class="data-table">
-    <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Tier</th><th>Admin</th><th>Can Upload</th><th></th></tr></thead><tbody>`;
+    <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Tier</th><th>Admin</th><th>Can upload</th><th>Actions</th></tr></thead><tbody>`;
   users.forEach(u => {
     html += `<tr data-id="${u.id}" data-tier="${u.tier_id}" data-admin="${u.is_admin}" data-upload="${u.can_upload_pools}" data-email="${escapeHtml(u.email || "")}">
       <td>${u.id}</td>
@@ -322,8 +323,8 @@ function renderUsersTable(users, container) {
       <td class="cell-admin">${u.is_admin ? "Yes" : "No"}</td>
       <td class="cell-upload">${u.can_upload_pools ? "Yes" : "No"}</td>
       <td class="admin-actions">
-        <button class="btn-icon edit-user" title="Edit">&#9998;</button>
-        <button class="btn-icon danger delete-user" title="Delete">&#128465;</button>
+        <button class="btn-icon edit-user" title="Edit" aria-label="Edit user">&#9998;</button>
+        <button class="btn-icon danger delete-user" title="Delete" aria-label="Delete user">&#128465;</button>
       </td>
     </tr>`;
   });
@@ -355,14 +356,14 @@ function startEditUser(row) {
   const oldAdmin = row.dataset.admin === "true";
   const oldUpload = row.dataset.upload === "true";
 
-  usernameCell.innerHTML = `<input type="text" class="edit-username" value="${escapeHtml(oldUsername)}" />`;
-  emailCell.innerHTML = `<input type="email" class="edit-email" value="${escapeHtml(oldEmail)}" />`;
-  tierCell.innerHTML = `<select class="edit-tier">${tierOptionsHtml(allTiers.filter(t => t.rank >= 0), oldTierId)}</select>`;
-  adminCell.innerHTML = `<input type="checkbox" class="edit-admin" ${oldAdmin ? "checked" : ""} />`;
-  uploadCell.innerHTML = `<input type="checkbox" class="edit-upload" ${oldUpload ? "checked" : ""} />`;
+  usernameCell.innerHTML = `<input type="text" class="edit-username" aria-label="Username" value="${escapeHtml(oldUsername)}" />`;
+  emailCell.innerHTML = `<input type="email" class="edit-email" aria-label="Email" value="${escapeHtml(oldEmail)}" />`;
+  tierCell.innerHTML = `<select class="edit-tier" aria-label="User tier">${tierOptionsHtml(allTiers.filter(t => t.rank >= 0), oldTierId)}</select>`;
+  adminCell.innerHTML = `<input type="checkbox" class="edit-admin" aria-label="Admin" ${oldAdmin ? "checked" : ""} />`;
+  uploadCell.innerHTML = `<input type="checkbox" class="edit-upload" aria-label="Can upload pools" ${oldUpload ? "checked" : ""} />`;
   actionsCell.innerHTML = `
-    <button class="btn-icon save-user" title="Save">&#10003;</button>
-    <button class="btn-icon danger cancel-user" title="Cancel">&#10005;</button>
+    <button class="btn-icon save-user" title="Save" aria-label="Save user">&#10003;</button>
+    <button class="btn-icon cancel-user" title="Cancel" aria-label="Cancel user edit">&#10005;</button>
   `;
 
   actionsCell.querySelector(".save-user").addEventListener("click", async () => {
@@ -391,8 +392,8 @@ function startEditUser(row) {
     adminCell.textContent = oldAdmin ? "Yes" : "No";
     uploadCell.textContent = oldUpload ? "Yes" : "No";
     actionsCell.innerHTML = `
-      <button class="btn-icon edit-user" title="Edit">&#9998;</button>
-      <button class="btn-icon danger delete-user" title="Delete">&#128465;</button>
+      <button class="btn-icon edit-user" title="Edit" aria-label="Edit user">&#9998;</button>
+      <button class="btn-icon danger delete-user" title="Delete" aria-label="Delete user">&#128465;</button>
     `;
     actionsCell.querySelector(".edit-user").addEventListener("click", () => startEditUser(row));
     actionsCell.querySelector(".delete-user").addEventListener("click", () => deleteUser(row));

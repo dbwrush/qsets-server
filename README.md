@@ -87,7 +87,8 @@ exact matches ignore case, punctuation, and extra whitespace. Parenthetical text
 is optional: `John (the man sent from God)` accepts either `John` or the full answer.
 Parenthesized alternatives separated by `OR` require at least one complete option;
 combining options in either order is also accepted. Other answers require
-self-assessment against the expected answer. Revealing/skipping is not correct.
+self-assessment using the side-by-side answer comparison (stacked on mobile).
+Skipping reveals the expected answer and is not counted as correct.
 The summary separates correct/on-time, correct/late, incorrect, skipped, and
 self-assessed correct answers; missed and late questions can be reviewed.
 
@@ -200,14 +201,16 @@ the name `private` and rank -1 must not already be used by custom tiers.
 ### Uploading and managing pools
 
 Users with **Can upload pools** permission (and admins) have a **My pools** link
-in their account menu at `/pools`. They can upload a CSV, replace its questions,
-or delete their own pools. `/admin` remains available for admins and as a
+in their account menu at `/pools`. Expand **Upload a CSV** to upload, or use the
+table actions to edit, replace, or delete their own pools. `/admin` remains available for admins and as a
 compatibility URL for uploaders; non-admins never see user, tier, or audit tools.
 Shared uploads are limited to the uploader's tier or lower; choosing **private**
 keeps the pool visible only to its uploader and admins. The management table
 shows who uploaded each pool, including private pools viewed by admins.
 
-**Create a pool on site** opens `/pools/new`; **Edit** opens the pool's editor.
+**Create pool** opens `/pools/new`; **Edit** opens the pool's editor.
+Admin tier/user creation forms expand above their management tables; user permissions
+are grouped separately from credentials.
 Admins and original uploaders can add, change, or remove individual questions and
 edit the name and visibility. Saves require at least one valid question. The editor
 writes the same CSV format used by uploads, including correct quoting, and refuses

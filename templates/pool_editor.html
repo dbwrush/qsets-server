@@ -6,30 +6,33 @@
   <title>Pool editor — QSets</title>
   <script src="/static/theme.js"></script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/style.css?v=cinematic-6" />
+  <link rel="stylesheet" href="/static/style.css?v=ui-consistency-1" />
 </head>
 <body data-csrf="{{ csrf_token }}">
   {% include "_header.html" %}
-  <main>
+  <main class="pool-editor-page">
     <section class="page-intro"><h1 class="page-title" id="editorTitle">Pool editor</h1></section>
     <p id="editorStatus" role="status">Loading...</p>
     <form id="poolEditor" class="panel" hidden>
       <fieldset id="editorFields">
+        <section class="form-section" aria-labelledby="poolDetailsTitle">
+          <h2 id="poolDetailsTitle">Pool details</h2>
         <div class="options-grid">
           <div class="form-group"><label for="poolName">Pool name</label><input id="poolName" required /></div>
           <div class="form-group"><label for="poolTier">Visibility / tier</label><select id="poolTier" required></select></div>
         </div>
+        </section>
         <h2>Questions</h2>
         <div id="editorQuestions"></div>
         <button type="button" id="addQuestion">Add question</button>
         <div class="wizard-nav">
-          <a href="/pools">Back to pools</a>
+          <a class="btn btn-ghost" href="/pools">Back to pools</a>
           <button type="submit" class="btn-primary">Save pool</button>
         </div>
       </fieldset>
     </form>
   </main>
   <script src="/static/header.js"></script>
-  <script type="module" src="/static/pool-editor.js"></script>
+  <script type="module" src="/static/pool-editor.js?v=ui-consistency-1"></script>
 </body>
 </html>

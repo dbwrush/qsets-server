@@ -6,7 +6,7 @@
   <title>{% if is_admin %}QSets Admin{% else %}My pools — QSets{% endif %}</title>
   <script src="/static/theme.js"></script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/style.css?v=cinematic-6" />
+  <link rel="stylesheet" href="/static/style.css?v=ui-consistency-1" />
 </head>
 <body data-csrf="{{ csrf_token }}">
   {% include "_header.html" %}
@@ -17,9 +17,9 @@
       <h1 class="page-title">{% if is_admin %}Manage QSets{% else %}My pools{% endif %}</h1>
     </section>
 
-    <div class="panel">
+    <div class="panel admin-panel">
 
-      <nav class="admin-tabs">
+      <nav class="admin-tabs" aria-label="Management sections">
         <button class="admin-tab active" data-tab="tab-pools">Pools</button>
         {% if is_admin %}
         <button class="admin-tab" data-tab="tab-tiers">Tiers</button>
@@ -30,26 +30,29 @@
 
       <!-- Pools tab -->
       <section class="admin-tab-content active" id="tab-pools">
-        <p id="create-pool-link" hidden><a class="btn" href="/pools/new">Create a pool on site</a></p>
-        <div id="pool-upload-area">
-        <h3>Upload a pool</h3>
+        <div class="section-heading">
+          <h2>{% if is_admin %}All pools{% else %}Your pools{% endif %}</h2>
+          <p id="create-pool-link" hidden><a class="btn btn-primary" href="/pools/new">Create pool</a></p>
+        </div>
+        <details id="pool-upload-area" class="management-create">
+        <summary>Upload a CSV</summary>
         <form id="upload-form" class="create-form">
           <div class="form-group">
-            <label>Pool Name</label>
-            <input name="name" type="text" required />
+            <label for="upload-name">Pool name</label>
+            <input id="upload-name" name="name" type="text" required />
           </div>
           <div class="form-group">
             <label for="upload-tier">Tier</label>
             <select name="tier_id" id="upload-tier" required></select>
-            <small class="form-hint">Private pools are visible only to you and admins. Shared pools can be published at your own tier or lower.</small>
+            <small class="form-hint">Private: only you and admins.</small>
           </div>
-          <div class="form-group">
-            <label>CSV File</label>
-            <input name="file" type="file" accept=".csv" required />
+          <div class="form-group form-wide">
+            <label for="upload-file">CSV file</label>
+            <input id="upload-file" name="file" type="file" accept=".csv" required />
           </div>
-          <button type="submit" class="btn-primary">Upload</button>
+          <div class="form-actions"><button type="submit" class="btn-primary">Upload pool</button></div>
         </form>
-        <div id="upload-status"></div>
+        <div id="upload-status" role="status"></div>
         <details class="csv-format-help">
           <summary>How to format your CSV</summary>
           <p>Export a UTF-8, comma-separated CSV with these headers and one question per row.
@@ -70,71 +73,75 @@ Example question text,General,John 1:1,Example answer</code></pre>
             a file with no valid questions is rejected. A standard set also needs enough questions
             of each required type in the selected chapters; smaller pools can use Custom mode.</p>
         </details>
-        </div>
-
-        <h3>{% if is_admin %}All pools{% else %}Your pools{% endif %}</h3>
-        <p class="form-hint">Edit questions, name, and visibility, or replace the CSV.</p>
+        </details>
         <input type="file" id="replace-file" accept=".csv" hidden />
-        <div id="replace-status"></div>
-        <div id="pools-table"></div>
+        <div id="replace-status" role="status"></div>
+        <div id="pools-table" class="table-scroll" role="region" aria-label="Question pools" tabindex="0"></div>
       </section>
 
       {% if is_admin %}
       <!-- Tiers tab -->
       <section class="admin-tab-content" id="tab-tiers">
-        <h3>Create a tier</h3>
+        <h2>Tiers</h2>
+        <details class="management-create">
+        <summary>Create a tier</summary>
         <form id="tier-form" class="create-form">
           <div class="form-group">
-            <label>Name</label>
-            <input name="name" type="text" required />
+            <label for="tier-name">Name</label>
+            <input id="tier-name" name="name" type="text" required />
           </div>
           <div class="form-group">
-            <label>Rank</label>
-            <input name="rank" type="number" min="0" required />
+            <label for="tier-rank">Rank</label>
+            <input id="tier-rank" name="rank" type="number" min="0" required />
           </div>
-          <button type="submit" class="btn-primary">Create</button>
+          <div class="form-actions"><button type="submit" class="btn-primary">Create tier</button></div>
         </form>
-        <div id="tiers-table"></div>
+        </details>
+        <div id="tiers-table" class="table-scroll" role="region" aria-label="Tiers" tabindex="0"></div>
       </section>
 
       <!-- Users tab -->
       <section class="admin-tab-content" id="tab-users">
-        <h3>Create a user</h3>
+        <h2>Users</h2>
+        <details class="management-create">
+        <summary>Create a user</summary>
         <form id="user-form" class="create-form">
           <div class="form-group">
-            <label>Username</label>
-            <input name="username" type="text" required />
+            <label for="user-name">Username</label>
+            <input id="user-name" name="username" type="text" autocomplete="off" required />
           </div>
           <div class="form-group">
-            <label>Email (optional)</label>
-            <input name="email" type="email" autocomplete="off" />
+            <label for="user-email">Email (optional)</label>
+            <input id="user-email" name="email" type="email" autocomplete="off" />
           </div>
           <div class="form-group">
-            <label>Password</label>
-            <input name="password" type="password" minlength="8" required />
+            <label for="user-password">Password</label>
+            <input id="user-password" name="password" type="password" autocomplete="new-password" minlength="8" required />
           </div>
           <div class="form-group">
             <label for="user-tier">Tier</label>
             <select name="tier_id" id="user-tier" required></select>
           </div>
-          <div class="form-group form-group-check">
+          <fieldset class="permission-fields">
+            <legend>Permissions</legend>
+            <div class="permission-options">
             <label class="checkbox-label">
               <input name="is_admin" type="checkbox" /> Admin
             </label>
-          </div>
-          <div class="form-group form-group-check">
             <label class="checkbox-label">
               <input name="can_upload_pools" type="checkbox" /> Can upload pools
             </label>
-          </div>
-          <button type="submit" class="btn-primary">Create</button>
+            </div>
+          </fieldset>
+          <div class="form-actions"><button type="submit" class="btn-primary">Create user</button></div>
         </form>
-        <div id="users-table"></div>
+        </details>
+        <div id="users-table" class="table-scroll" role="region" aria-label="Users" tabindex="0"></div>
       </section>
 
       <!-- Audit tab -->
       <section class="admin-tab-content" id="tab-audit">
-        <h3>Audit Log</h3>
+        <h2>Audit log</h2>
         <form id="audit-filter" class="create-form">
           <div class="form-group">
             <label for="audit-action">Action</label>
@@ -150,7 +157,7 @@ Example question text,General,John 1:1,Example answer</code></pre>
             </select>
           </div>
         </form>
-        <div id="audit-table"></div>
+        <div id="audit-table" class="table-scroll" role="region" aria-label="Audit log" tabindex="0"></div>
         <button type="button" class="btn-ghost" id="audit-more" hidden>Load more</button>
       </section>
       {% endif %}
@@ -162,6 +169,6 @@ Example question text,General,John 1:1,Example answer</code></pre>
   </footer>
 
   <script src="/static/header.js"></script>
-  <script src="/static/admin.js?v=pool-editor-1"></script>
+  <script src="/static/admin.js?v=ui-consistency-1"></script>
 </body>
 </html>

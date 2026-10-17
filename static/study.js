@@ -25,6 +25,7 @@ async function api(url, body) {
 
 function show(section) {
   for (const id of ["studySetup", "studyQuestion", "studySummary"]) $(id).hidden = id !== section;
+  $("studyIntro").hidden = section !== "studySetup";
 }
 
 async function loadPassages() {
@@ -117,10 +118,10 @@ function begin(selected) {
 
 function tick() {
   const remaining = Math.max(0, QUESTION_MS - (performance.now() - started));
-  $("studyTimer").textContent = `${Math.ceil(remaining / 1000)} seconds remaining`;
+  $("studyTimer").textContent = `${Math.ceil(remaining / 1000)}s`;
   $("studyTimer").classList.toggle("study-time-expired", remaining === 0);
   if (remaining === 0) {
-    $("studyExpired").textContent = "Time expired. You can still submit a late answer.";
+    $("studyExpired").textContent = "Time’s up";
     clearInterval(interval);
   }
 }
@@ -130,7 +131,8 @@ function nextQuestion() {
   pending = null;
   $("studyProgress").textContent = `Question ${index + 1} of ${questions.length}`;
   $("studyPrompt").textContent = questions[index].question;
-  $("studyType").textContent = questions[index].type;
+  $("studyType").textContent = questions[index].type.replaceAll("-", " ");
+  $("studyTimer").hidden = false;
   $("studyAnswer").value = "";
   $("studyAnswerForm").hidden = false;
   $("studyFeedback").hidden = true;
@@ -156,15 +158,19 @@ function submit(skipped) {
   };
   $("studyAnswerForm").hidden = true;
   $("studyFeedback").hidden = false;
-  $("studySubmitted").textContent = skipped ? "Skipped / revealed without an answer."
-    : `Your answer: ${answer} (${(pending.elapsed / 1000).toFixed(1)}s; ${pending.onTime ? "within 20 seconds" : "late"})`;
+  $("studyTimer").hidden = true;
+  $("studyExpired").textContent = "";
+  $("studySubmittedCard").hidden = skipped;
+  $("studySubmitted").textContent = answer;
+  $("studyTiming").textContent = skipped ? "" : `${(pending.elapsed / 1000).toFixed(1)}s · ${pending.onTime ? "On time" : "Late"}`;
+  $("studyTiming").classList.toggle("study-time-expired", !pending.onTime && !skipped);
   $("studyExpected").textContent = questions[index].answer;
   $("studyReference").textContent = questions[index].reference;
   if (pending.correct || skipped) {
-    $("studyAssessment").textContent = pending.correct ? "Correct (normalized exact match)." : "Not counted as correct.";
+    $("studyAssessment").textContent = pending.correct ? "Correct" : "Skipped";
     record();
   } else {
-    $("studyAssessment").textContent = "No exact match. Assess your answer against the expected answer.";
+    $("studyAssessment").textContent = "Check your answer";
     $("studySelfGrade").hidden = false;
     $("studyCorrect").focus();
   }
@@ -185,7 +191,7 @@ for (const [id, correct] of [["studyCorrect", true], ["studyIncorrect", false]])
     if (!pending || $("studySelfGrade").hidden) return;
     pending.correct = correct;
     pending.selfAssessed = true;
-    $("studyAssessment").textContent = correct ? "Marked correct." : "Marked as needing practice.";
+    $("studyAssessment").textContent = correct ? "Correct" : "Needs practice";
     record();
   });
 }
@@ -199,19 +205,21 @@ function finish() {
   active = false;
   const stats = summarize(results);
   reviewQuestions = results.filter(r => !r.correct || !r.onTime).map(r => r.question);
-  $("studySummaryText").textContent = `${stats.answered} of ${questions.length} questions completed.`;
+  $("studySummaryText").textContent = `${stats.answered} of ${questions.length} completed`;
   $("studyStats").replaceChildren();
   for (const [label, value] of [
     ["Correct", `${stats.correct} / ${stats.answered}`],
-    ["Correct within 20 seconds", `${stats.onTime} / ${stats.answered}`],
-    ["Correct but late", stats.late], ["Incorrect", stats.incorrect],
-    ["Skipped / revealed", stats.skipped], ["Self-assessed correct", stats.selfCorrected],
+    ["Correct in 20s", `${stats.onTime} / ${stats.answered}`],
+    ["Correct, late", stats.late], ["Incorrect", stats.incorrect],
+    ["Skipped", stats.skipped], ["Self-marked correct", stats.selfCorrected],
   ]) {
     const term = document.createElement("dt");
     const description = document.createElement("dd");
     term.textContent = label;
     description.textContent = value;
-    $("studyStats").append(term, description);
+    const item = document.createElement("div");
+    item.append(term, description);
+    $("studyStats").append(item);
   }
   $("studyReview").disabled = reviewQuestions.length === 0;
   show("studySummary");
@@ -219,7 +227,7 @@ function finish() {
 }
 
 $("studyFinish").addEventListener("click", () => {
-  if (!confirm("End this session? An unanswered or unassessed question will not count in the results.")) return;
+  if (!confirm("End session?")) return;
   finish();
 });
 $("studyReview").addEventListener("click", () => {
