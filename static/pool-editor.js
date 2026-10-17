@@ -4,6 +4,7 @@ let id = location.pathname.match(/^\/pools\/(\d+)\/edit$/)?.[1];
 let version = null;
 let dirty = false;
 let saving = false;
+let nextQuestionId = 0;
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -20,11 +21,17 @@ function addQuestion(question = { question: "", type: "General", reference: "", 
   card.className = "editor-question";
   const legend = document.createElement("legend");
   card.append(legend);
+  const fields = document.createElement("div");
+  fields.className = "editor-question-fields";
+  const questionId = ++nextQuestionId;
   for (const [key, label] of [["question", "Question"], ["type", "Type"], ["reference", "Reference"], ["answer", "Answer"]]) {
-    const wrapper = document.createElement("label");
-    wrapper.className = "form-group";
-    wrapper.append(document.createTextNode(label));
+    const wrapper = document.createElement("div");
+    wrapper.className = `form-group editor-field-${key}`;
+    const fieldLabel = document.createElement("label");
+    fieldLabel.textContent = label;
+    fieldLabel.htmlFor = `question-${questionId}-${key}`;
     const input = document.createElement(key === "type" ? "select" : key === "reference" ? "input" : "textarea");
+    input.id = fieldLabel.htmlFor;
     input.dataset.field = key;
     input.required = true;
     if (key === "type") {
@@ -33,20 +40,25 @@ function addQuestion(question = { question: "", type: "General", reference: "", 
       for (const type of types) {
         const option = document.createElement("option");
         option.value = type;
-        option.textContent = type;
+        option.textContent = type.replaceAll("-", " ");
         option.selected = type.toLowerCase() === question.type.toLowerCase();
         input.append(option);
       }
     } else {
       input.value = question[key];
-      if (key === "reference") input.placeholder = "John 1:1";
+      if (key === "reference") {
+        input.type = "text";
+        input.placeholder = "John 1:1";
+      }
       else input.rows = 2;
     }
-    wrapper.append(input);
-    card.append(wrapper);
+    wrapper.append(fieldLabel, input);
+    fields.append(wrapper);
   }
+  card.append(fields);
   const remove = document.createElement("button");
   remove.type = "button";
+  remove.className = "btn-ghost btn-danger";
   remove.textContent = "Remove question";
   remove.addEventListener("click", () => {
     if (!confirm("Remove this question?")) return;
@@ -54,7 +66,10 @@ function addQuestion(question = { question: "", type: "General", reference: "", 
     dirty = true;
     renumber();
   });
-  card.append(remove);
+  const actions = document.createElement("div");
+  actions.className = "question-actions";
+  actions.append(remove);
+  card.append(actions);
   $("editorQuestions").append(card);
   renumber();
   return card;
@@ -86,6 +101,7 @@ $("poolEditor").addEventListener("submit", async event => {
   saving = true;
   $("editorFields").disabled = true;
   $("editorStatus").textContent = "Saving...";
+  $("editorStatus").className = "";
   try {
     const data = await api(id ? `/api/pools/${id}/editor` : "/api/pools/create", {
       method: id ? "PUT" : "POST",
@@ -99,8 +115,10 @@ $("poolEditor").addEventListener("submit", async event => {
     history.replaceState(null, "", `/pools/${id}/edit`);
     $("editorTitle").textContent = "Edit pool";
     $("editorStatus").textContent = "Pool saved.";
+    $("editorStatus").className = "success";
   } catch (error) {
     $("editorStatus").textContent = error.message;
+    $("editorStatus").className = "error";
   } finally {
     saving = false;
     $("editorFields").disabled = false;
@@ -132,4 +150,5 @@ try {
   $("editorStatus").textContent = "";
 } catch (error) {
   $("editorStatus").textContent = error.message;
+  $("editorStatus").className = "error";
 }
