@@ -30,6 +30,8 @@
 
       <!-- Pools tab -->
       <section class="admin-tab-content active" id="tab-pools">
+        <p id="create-pool-link" hidden><a class="btn" href="/pools/new">Create a pool on site</a></p>
+        <div id="pool-upload-area">
         <h3>Upload a pool</h3>
         <form id="upload-form" class="create-form">
           <div class="form-group">
@@ -68,9 +70,10 @@ Example question text,General,John 1:1,Example answer</code></pre>
             a file with no valid questions is rejected. A standard set also needs enough questions
             of each required type in the selected chapters; smaller pools can use Custom mode.</p>
         </details>
+        </div>
 
         <h3>{% if is_admin %}All pools{% else %}Your pools{% endif %}</h3>
-        <p class="form-hint">Replacing a pool swaps in a new CSV and keeps its name and tier.</p>
+        <p class="form-hint">Edit questions, name, and visibility, or replace the CSV.</p>
         <input type="file" id="replace-file" accept=".csv" hidden />
         <div id="replace-status"></div>
         <div id="pools-table"></div>
@@ -159,6 +162,6 @@ Example question text,General,John 1:1,Example answer</code></pre>
   </footer>
 
   <script src="/static/header.js"></script>
-  <script src="/static/admin.js?v=private-pools-1"></script>
+  <script src="/static/admin.js?v=pool-editor-1"></script>
 </body>
 </html>

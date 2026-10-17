@@ -204,8 +204,20 @@ Shared uploads are limited to the uploader's tier or lower; choosing **private**
 keeps the pool visible only to its uploader and admins. The management table
 shows who uploaded each pool, including private pools viewed by admins.
 
-Revoking upload permission prevents new uploads and replacement/deletion, but an
-owner can still read and generate from their private pools. Pools whose uploader
+**Create a pool on site** opens `/pools/new`; **Edit** opens the pool's editor.
+Admins and original uploaders can add, change, or remove individual questions and
+edit the name and visibility. Saves require at least one valid question. The editor
+writes the same CSV format used by uploads, including correct quoting, and refuses
+to overwrite a pool changed since it was opened. Editing a CSV with skipped/invalid
+rows is blocked until a cleaned CSV is supplied, so rows are not silently dropped.
+
+Revoking upload permission prevents new uploads/creation and deletion, but owners
+retain **My pools**, question/metadata editing, and CSV replacement. Owners may keep
+the current tier, choose private, or change to a shared tier at or below their own;
+only admins may publish above their tier. Editing does not transfer ownership.
+Management access does not grant generation access to a shared pool above the
+owner's current tier. Owners can still read and generate from their private pools.
+Pools whose uploader
 has been deleted remain visible only to admins and show an unknown/deleted owner.
 
 ## Run

@@ -33,7 +33,7 @@ impl Header {
                 .map(|c| c.to_uppercase().collect())
                 .unwrap_or_default(),
             can_access_admin: user.is_some_and(|u| u.is_admin),
-            can_manage_pools: user.is_some_and(|u| u.is_admin || u.can_upload_pools),
+            can_manage_pools: user.is_some_and(|u| u.is_admin || u.can_upload_pools || u.has_pools),
         }
     }
 }
@@ -44,6 +44,7 @@ struct SignedInUser {
     email_verified: bool,
     is_admin: bool,
     can_upload_pools: bool,
+    has_pools: bool,
 }
 
 #[derive(Template)]
@@ -56,6 +57,13 @@ struct IndexTemplate<'a> {
 #[derive(Template)]
 #[template(path = "study.html")]
 struct StudyTemplate<'a> {
+    csrf_token: &'a str,
+    header: Header,
+}
+
+#[derive(Template)]
+#[template(path = "pool_editor.html")]
+struct PoolEditorTemplate<'a> {
     csrf_token: &'a str,
     header: Header,
 }
@@ -125,6 +133,8 @@ pub fn router(state: AppState) -> Router {
         .route("/account", get(account_page))
         .route("/admin", get(admin_page))
         .route("/pools", get(admin_page))
+        .route("/pools/new", get(pool_editor_page))
+        .route("/pools/:id/edit", get(pool_editor_page))
         .with_state(state)
 }
 
@@ -230,8 +240,9 @@ fn forbidden_page() -> Response {
 /// The signed-in user behind the session cookie, or `None` for anonymous visitors.
 async fn signed_in_user(state: &AppState, jar: &CookieJar) -> Option<SignedInUser> {
     let user_id = auth::get_user_id_from_jar(&state.pool, jar).await?;
-    sqlx::query_as::<_, (String, Option<String>, bool, bool, bool)>(
-        "SELECT username, email, email_verified_at IS NOT NULL, is_admin, can_upload_pools
+    sqlx::query_as::<_, (String, Option<String>, bool, bool, bool, bool)>(
+        "SELECT username, email, email_verified_at IS NOT NULL, is_admin, can_upload_pools,
+                EXISTS(SELECT 1 FROM question_pools WHERE created_by = users.id)
          FROM users WHERE id = $1",
     )
     .bind(user_id)
@@ -239,12 +250,13 @@ async fn signed_in_user(state: &AppState, jar: &CookieJar) -> Option<SignedInUse
     .await
     .unwrap_or(None)
     .map(
-        |(username, email, email_verified, is_admin, can_upload_pools)| SignedInUser {
+        |(username, email, email_verified, is_admin, can_upload_pools, has_pools)| SignedInUser {
             username,
             email,
             email_verified,
             is_admin,
             can_upload_pools,
+            has_pools,
         },
     )
 }
@@ -269,7 +281,7 @@ async fn admin_page(State(state): State<AppState>, jar: CookieJar) -> Response {
     let Some(user) = signed_in_user(&state, &jar).await else {
         return Redirect::to("/login").into_response();
     };
-    if !user.is_admin && !user.can_upload_pools {
+    if !user.is_admin && !user.can_upload_pools && !user.has_pools {
         return forbidden_page();
     }
 
@@ -280,6 +292,20 @@ async fn admin_page(State(state): State<AppState>, jar: CookieJar) -> Response {
             csrf_token: &csrf,
             header: Header::new(Some(&user)),
             is_admin: user.is_admin,
+        },
+    )
+}
+
+async fn pool_editor_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let Some(user) = signed_in_user(&state, &jar).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let (jar, csrf) = security::ensure_csrf_cookie(jar);
+    render(
+        jar,
+        PoolEditorTemplate {
+            csrf_token: &csrf,
+            header: Header::new(Some(&user)),
         },
     )
 }

@@ -197,6 +197,51 @@ pub fn available_type_counts(pool: &[QuestionRecord]) -> HashMap<&'static str, u
     counts
 }
 
+pub fn questions_to_csv(questions: &[QuestionRecord]) -> Result<String, String> {
+    if questions.is_empty() {
+        return Err("Add at least one question".to_string());
+    }
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer
+        .write_record(["Question", "Type", "Reference", "Answer"])
+        .map_err(|error| format!("Could not write CSV headers: {error}"))?;
+    for (index, q) in questions.iter().enumerate() {
+        let row = index + 1;
+        if [&q.question, &q.qtype, &q.reference, &q.answer]
+            .iter()
+            .any(|v| v.trim().is_empty())
+        {
+            return Err(format!("Question {row}: fill in all four fields"));
+        }
+        if q.question.trim().starts_with("LICENSE") {
+            return Err(format!(
+                "Question {row}: question text cannot start with LICENSE"
+            ));
+        }
+        if !VALID_TYPES
+            .iter()
+            .any(|t| q.qtype.trim().eq_ignore_ascii_case(t))
+        {
+            return Err(format!("Question {row}: unknown question type"));
+        }
+        if parse_book_and_chapter(q.reference.trim()).is_none() {
+            return Err(format!("Question {row}: use a reference such as John 1:1"));
+        }
+        writer
+            .write_record([
+                q.question.trim(),
+                q.qtype.trim(),
+                q.reference.trim(),
+                q.answer.trim(),
+            ])
+            .map_err(|error| format!("Could not write question {row}: {error}"))?;
+    }
+    let bytes = writer
+        .into_inner()
+        .map_err(|error| format!("Could not finish CSV: {error}"))?;
+    String::from_utf8(bytes).map_err(|error| format!("Could not encode CSV: {error}"))
+}
+
 const REQUIRED_TYPES_FOR_STANDARD: &[&str] = &[
     "Situation",
     "Quote",

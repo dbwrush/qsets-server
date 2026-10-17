@@ -82,6 +82,10 @@ pub fn can_upload(actor: &Actor) -> bool {
     actor.is_admin || actor.can_upload_pools
 }
 
+pub fn can_edit_pool(actor: &Actor, created_by: Option<i32>) -> bool {
+    actor.is_admin || actor.user_id.is_some_and(|id| Some(id) == created_by)
+}
+
 /// Pools may be replaced or deleted by an admin, or by the uploader who created them while they
 /// still have upload permission and a tier at or above the pool's.
 pub fn can_manage_pool(actor: &Actor, pool_created_by: Option<i32>, pool_tier_rank: i32) -> bool {
@@ -297,6 +301,15 @@ mod tests {
     #[test]
     fn anonymous_may_not_manage_pools() {
         assert!(!can_manage_pool(&Actor::anonymous(), Some(1), 0));
+    }
+
+    #[test]
+    fn original_uploaders_can_edit_without_upload_permission() {
+        assert!(can_edit_pool(&actor(0, false, false), Some(1)));
+        assert!(!can_edit_pool(&actor(99, false, true), Some(2)));
+        assert!(!can_edit_pool(&Actor::anonymous(), None));
+        assert!(!can_edit_pool(&actor(0, false, true), None));
+        assert!(can_edit_pool(&actor(0, true, false), None));
     }
 
     #[test]
