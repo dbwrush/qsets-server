@@ -56,6 +56,7 @@ async function loadAssignableTiers() {
     if (select) select.innerHTML = tierOptionsHtml(assignableTiers);
   } catch (err) {
     if (select) select.innerHTML = "";
+    document.getElementById("upload-status").innerHTML = `<p class="msg-error">Failed to load tiers: ${escapeHtml(err.message)}</p>`;
     console.error("Failed to load tiers:", err);
   }
 }
@@ -64,7 +65,7 @@ async function loadAllTiers() {
   const data = await adminApi("/api/admin/tiers");
   allTiers = data.tiers || [];
   const userTierSelect = document.getElementById("user-tier");
-  if (userTierSelect) userTierSelect.innerHTML = tierOptionsHtml(allTiers);
+  if (userTierSelect) userTierSelect.innerHTML = tierOptionsHtml(allTiers.filter(t => t.rank >= 0));
   return allTiers;
 }
 
@@ -112,11 +113,12 @@ async function loadManagedPools() {
 function renderPoolsTable(pools, container) {
   if (!pools.length) { container.innerHTML = '<p class="msg-info">No pools you can manage.</p>'; return; }
   let html = `<table class="data-table">
-    <thead><tr><th>Name</th><th>Tier</th><th>Last updated</th><th></th></tr></thead><tbody>`;
+    <thead><tr><th>Name</th><th>Tier</th><th>Uploaded by</th><th>Last updated</th><th></th></tr></thead><tbody>`;
   pools.forEach(p => {
     html += `<tr data-id="${p.id}" data-name="${escapeHtml(p.name)}">
       <td>${escapeHtml(p.name)}</td>
       <td>${escapeHtml(p.tier_name)}</td>
+      <td>${escapeHtml(p.created_by_username || "Unknown / deleted user")}</td>
       <td>${escapeHtml(new Date(p.updated_at).toLocaleString())}</td>
       <td class="admin-actions">
         <button class="btn-icon replace-pool" title="Replace CSV">&#8635;</button>
@@ -193,8 +195,9 @@ function renderTiersTable(tiers, container) {
       <td class="cell-name">${escapeHtml(t.name)}</td>
       <td class="cell-rank">${t.rank}</td>
       <td class="admin-actions">
+        ${t.rank === -1 ? '<span class="form-hint">Built-in (pools only)</span>' : `
         <button class="btn-icon edit-tier" title="Edit">&#9998;</button>
-        <button class="btn-icon danger delete-tier" title="Delete">&#128465;</button>
+        <button class="btn-icon danger delete-tier" title="Delete">&#128465;</button>`}
       </td>
     </tr>`;
   });
@@ -351,7 +354,7 @@ function startEditUser(row) {
 
   usernameCell.innerHTML = `<input type="text" class="edit-username" value="${escapeHtml(oldUsername)}" />`;
   emailCell.innerHTML = `<input type="email" class="edit-email" value="${escapeHtml(oldEmail)}" />`;
-  tierCell.innerHTML = `<select class="edit-tier">${tierOptionsHtml(allTiers, oldTierId)}</select>`;
+  tierCell.innerHTML = `<select class="edit-tier">${tierOptionsHtml(allTiers.filter(t => t.rank >= 0), oldTierId)}</select>`;
   adminCell.innerHTML = `<input type="checkbox" class="edit-admin" ${oldAdmin ? "checked" : ""} />`;
   uploadCell.innerHTML = `<input type="checkbox" class="edit-upload" ${oldUpload ? "checked" : ""} />`;
   actionsCell.innerHTML = `

@@ -9,6 +9,7 @@ use crate::{services::auth, state::AppState};
 
 /// Rank granted to anonymous visitors; matches the seeded `public` tier.
 pub const ANONYMOUS_TIER_RANK: i32 = 0;
+pub const PRIVATE_TIER_RANK: i32 = -1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Actor {
@@ -54,17 +55,27 @@ pub struct PoolAccess {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A pool is readable when its tier sits at or below the actor's tier.
+/// Shared pools inherit access from lower ranks; private pools need an ownership check.
 pub fn can_access_pool(actor: &Actor, pool_tier_rank: i32) -> bool {
-    actor.is_admin || pool_tier_rank <= actor.tier_rank
+    actor.is_admin || (pool_tier_rank != PRIVATE_TIER_RANK && pool_tier_rank <= actor.tier_rank)
 }
 
-/// Uploading requires the explicit permission; the chosen tier may not exceed the uploader's own.
+pub fn can_read_pool(actor: &Actor, pool: &PoolAccess) -> bool {
+    if pool.tier_rank == PRIVATE_TIER_RANK {
+        actor.is_admin || actor.user_id.is_some_and(|id| Some(id) == pool.created_by)
+    } else {
+        can_access_pool(actor, pool.tier_rank)
+    }
+}
+
+/// Uploaders can choose private or a shared tier at or below their own.
 pub fn can_assign_pool_tier(actor: &Actor, target_tier_rank: i32) -> bool {
     if actor.is_admin {
         return true;
     }
-    actor.can_upload_pools && target_tier_rank <= actor.tier_rank
+    actor.user_id.is_some()
+        && actor.can_upload_pools
+        && (target_tier_rank == PRIVATE_TIER_RANK || target_tier_rank <= actor.tier_rank)
 }
 
 pub fn can_upload(actor: &Actor) -> bool {
@@ -91,6 +102,9 @@ pub fn can_manage_pool(actor: &Actor, pool_created_by: Option<i32>, pool_tier_ra
 /// public tier: moving it would hide public pools, and ranks below it would be readable by
 /// everyone while looking restricted.
 pub fn validate_tier_rank(current_rank: Option<i32>, new_rank: i32) -> Result<(), &'static str> {
+    if current_rank == Some(PRIVATE_TIER_RANK) {
+        return Err("The private tier cannot be changed");
+    }
     if new_rank < ANONYMOUS_TIER_RANK {
         return Err("Tier rank must not be negative");
     }
@@ -101,7 +115,7 @@ pub fn validate_tier_rank(current_rank: Option<i32>, new_rank: i32) -> Result<()
 }
 
 pub fn can_delete_tier(tier_rank: i32) -> bool {
-    tier_rank != ANONYMOUS_TIER_RANK
+    tier_rank != ANONYMOUS_TIER_RANK && tier_rank != PRIVATE_TIER_RANK
 }
 
 pub async fn load_actor(pool: &PgPool, jar: &CookieJar) -> Actor {
@@ -283,5 +297,44 @@ mod tests {
     #[test]
     fn anonymous_may_not_manage_pools() {
         assert!(!can_manage_pool(&Actor::anonymous(), Some(1), 0));
+    }
+
+    #[test]
+    fn private_pools_are_owner_only_regardless_of_rank() {
+        let mut pool = PoolAccess {
+            id: 1,
+            name: "private pool".to_string(),
+            tier_id: 1,
+            tier_name: "private".to_string(),
+            tier_rank: PRIVATE_TIER_RANK,
+            created_by: Some(1),
+            updated_at: Utc::now(),
+        };
+        assert!(!can_access_pool(&Actor::anonymous(), PRIVATE_TIER_RANK));
+        assert!(!can_read_pool(&Actor::anonymous(), &pool));
+        assert!(can_read_pool(&actor(0, false, false), &pool));
+        let mut other = actor(99, false, true);
+        other.user_id = Some(2);
+        assert!(!can_read_pool(&other, &pool));
+        assert!(can_read_pool(&actor(0, true, false), &pool));
+        assert!(can_assign_pool_tier(
+            &actor(0, false, true),
+            PRIVATE_TIER_RANK
+        ));
+        assert!(!can_assign_pool_tier(
+            &actor(0, false, false),
+            PRIVATE_TIER_RANK
+        ));
+        assert!(can_manage_pool(
+            &actor(0, false, true),
+            Some(1),
+            PRIVATE_TIER_RANK
+        ));
+        assert!(!can_manage_pool(&other, Some(1), PRIVATE_TIER_RANK));
+        pool.created_by = None;
+        assert!(!can_read_pool(&actor(0, false, true), &pool));
+        assert!(can_read_pool(&actor(0, true, false), &pool));
+        assert!(validate_tier_rank(Some(PRIVATE_TIER_RANK), 0).is_err());
+        assert!(!can_delete_tier(PRIVATE_TIER_RANK));
     }
 }

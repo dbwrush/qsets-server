@@ -89,7 +89,7 @@ async fn authorize_pool_access(
     pool_id: i32,
 ) -> ApiResult<PoolAccess> {
     let pool = load_pool(state, pool_id).await?;
-    if !authz::can_access_pool(actor, pool.tier_rank) {
+    if !authz::can_read_pool(actor, &pool) {
         return Err(ApiError::forbidden("Tier access denied"));
     }
     Ok(pool)
@@ -346,10 +346,14 @@ async fn change_own_password(
 /// Tiers the caller is permitted to assign when uploading a pool.
 async fn list_assignable_tiers(State(state): State<AppState>, actor: Actor) -> ApiResult {
     let tiers = sqlx::query_as::<_, Tier>(
-        "SELECT id, name, rank FROM tiers WHERE $1 OR rank <= $2 ORDER BY rank ASC",
+        "SELECT id, name, rank FROM tiers
+         WHERE $1 OR (rank >= 0 AND rank <= $2) OR (rank = $3 AND $4)
+         ORDER BY rank ASC",
     )
     .bind(actor.is_admin)
     .bind(actor.tier_rank)
+    .bind(authz::PRIVATE_TIER_RANK)
+    .bind(authz::can_upload(&actor))
     .fetch_all(&state.pool)
     .await
     .map_err(db_error("Failed to load tiers"))?;
@@ -369,19 +373,24 @@ async fn list_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
         tier_name: String,
         tier_rank: i32,
         created_by: Option<i32>,
+        created_by_username: Option<String>,
         updated_at: chrono::DateTime<chrono::Utc>,
     }
 
     let pools = sqlx::query_as::<_, PoolRow>(
         "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank,
-                qp.created_by, qp.updated_at
+                qp.created_by, u.username AS created_by_username, qp.updated_at
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
-         WHERE $1 OR t.rank <= $2
+         LEFT JOIN users u ON u.id = qp.created_by
+         WHERE $1 OR (t.rank <> $3 AND t.rank <= $2)
+             OR (t.rank = $3 AND qp.created_by = $4)
          ORDER BY qp.created_at DESC",
     )
     .bind(actor.is_admin)
     .bind(actor.tier_rank)
+    .bind(authz::PRIVATE_TIER_RANK)
+    .bind(actor.user_id)
     .fetch_all(&state.pool)
     .await
     .map_err(db_error("Failed to load pools"))?;
@@ -396,6 +405,8 @@ async fn list_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
                 "tier_name": p.tier_name,
                 "tier_rank": p.tier_rank,
                 "updated_at": p.updated_at,
+                "created_by": p.created_by,
+                "created_by_username": p.created_by_username,
                 "can_manage": authz::can_manage_pool(&actor, p.created_by, p.tier_rank),
             })
         })
@@ -826,6 +837,9 @@ async fn create_tier(
     Json(body): Json<TierBody>,
 ) -> ApiResult {
     let name = body.name.trim();
+    if name.eq_ignore_ascii_case("private") {
+        return Err(ApiError::bad_request("The private tier is reserved"));
+    }
     if name.is_empty() {
         return Err(ApiError::bad_request("Tier name must not be empty"));
     }
@@ -861,6 +875,9 @@ async fn update_tier(
     Json(body): Json<TierBody>,
 ) -> ApiResult {
     let name = body.name.trim();
+    if name.eq_ignore_ascii_case("private") {
+        return Err(ApiError::bad_request("The private tier is reserved"));
+    }
     if name.is_empty() {
         return Err(ApiError::bad_request("Tier name must not be empty"));
     }
@@ -905,7 +922,9 @@ async fn delete_tier(
         .map_err(db_error("Failed to load tier"))?
         .ok_or_else(tier_not_found)?;
     if !authz::can_delete_tier(rank) {
-        return Err(ApiError::bad_request("The public tier cannot be deleted"));
+        return Err(ApiError::bad_request(
+            "The public and private tiers cannot be deleted",
+        ));
     }
 
     let tier_id = sqlx::query_scalar::<_, i32>("DELETE FROM tiers WHERE id = $1 RETURNING id")
@@ -1019,12 +1038,26 @@ async fn list_users(State(state): State<AppState>, _admin: Admin) -> ApiResult {
     ok(json!({"users": safe}))
 }
 
+async fn validate_user_tier(state: &AppState, tier_id: i32) -> ApiResult<()> {
+    let rank = authz::tier_rank(&state.pool, tier_id)
+        .await
+        .map_err(db_error("Failed to validate user tier"))?
+        .ok_or_else(|| ApiError::bad_request("Unknown tier"))?;
+    if rank == authz::PRIVATE_TIER_RANK {
+        return Err(ApiError::bad_request(
+            "The private tier is for pools, not users",
+        ));
+    }
+    Ok(())
+}
+
 async fn create_user(
     State(state): State<AppState>,
     client: ClientMeta,
     Admin(actor): Admin,
     Json(body): Json<CreateUserBody>,
 ) -> ApiResult {
+    validate_user_tier(&state, body.tier_id).await?;
     let username = body.username.trim();
     if username.is_empty() {
         return Err(ApiError::bad_request("Username must not be empty"));
@@ -1076,6 +1109,7 @@ async fn update_user(
     Path(id): Path<i32>,
     Json(body): Json<UpdateUserBody>,
 ) -> ApiResult {
+    validate_user_tier(&state, body.tier_id).await?;
     if actor == id && !body.is_admin {
         return Err(ApiError::bad_request(
             "You cannot remove your own admin role",

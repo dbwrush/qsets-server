@@ -20,6 +20,7 @@
           <div class="user-menu-panel" id="user-menu" hidden>
             <div class="user-menu-head">Signed in as <strong>{{ header.username }}</strong></div>
             <a class="menu-item" href="/account">Account</a>
+            {% if header.can_manage_pools %}<a class="menu-item" href="/pools">My pools</a>{% endif %}
             {% if header.can_access_admin %}<a class="menu-item" href="/admin">Admin</a>{% endif %}
             <label class="menu-item theme-switch">
               <span>Dark mode</span>
