@@ -73,6 +73,31 @@ nonempty `books` selection, and returns `valid`, `error` (null when valid), and
 `available` counts for all eight types. It checks the same chapter constraints
 without recording a generation event or returning question sets.
 
+## Study mode
+
+Open **Study** in the shared header (`/study`), choose a pool, passages, question
+types, and session length (0 means all matching questions). Questions are shuffled
+without repeating a pool entry; a request larger than the available pool uses all
+matching questions. Study does not use standard-set distributions or chapter caps.
+
+Each question has 20 seconds from display to complete and submit an answer.
+The clock continues while the tab is inactive. Expiry does not prevent submission:
+correctness and submitting within 20 seconds are tracked separately. Normalized
+exact matches ignore case, punctuation, and extra whitespace. Other answers require
+self-assessment against the expected answer. Revealing/skipping is not correct.
+The summary separates correct/on-time, correct/late, incorrect, skipped, and
+self-assessed correct answers; missed and late questions can be reviewed.
+
+Study state exists only in browser memory: no database writes, local/session storage,
+cookies containing study progress, or study audit events. Refresh/navigation discards
+the session. The access-controlled `POST /api/study/questions` endpoint returns a
+randomized question batch with `Cache-Control: no-store`. Answers are loaded into
+browser memory with the batch and hidden until submission/reveal; this is practice,
+not a cheat-resistant examination. Answers, timing, and results are never submitted
+to the server. Existing shared/private pool permissions apply.
+
+JavaScript study logic tests: `node --test tests/study-session.test.mjs`.
+
 ## Environment
 
 Copy `.env.example` to `.env`, then optionally add an environment-specific override file:

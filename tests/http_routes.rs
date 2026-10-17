@@ -478,6 +478,139 @@ async fn uploaders_have_a_non_admin_pool_management_page(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn study_returns_filtered_questions_without_saving_a_session(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let pool_id = create_pool(&pool, "study-pool", public).await;
+    sqlx::query("UPDATE question_pools SET csv_text = csv_text || $1 WHERE id = $2")
+        .bind(
+            "Other chapter,General,John 2:1,Other answer\nOther type,Quote,John 1:4,Quote answer\n",
+        )
+        .bind(pool_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let body = json!({
+        "pool_id": pool_id,
+        "books": [{"name": "John", "start_chapter": 1, "end_chapter": 1}],
+        "types": ["General"], "count": 2,
+    });
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/study/questions",
+            None,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let data: Value = serde_json::from_slice(&bytes).unwrap();
+    let selected = data["questions"].as_array().unwrap();
+    assert_eq!(selected.len(), 2);
+    assert_ne!(selected[0]["question"], selected[1]["question"]);
+    assert!(selected
+        .iter()
+        .all(|q| q["type"] == "General" && q["answer"].is_string()));
+    for count in [0, 999] {
+        let mut body = body.clone();
+        body["count"] = json!(count);
+        let (status, data) = send(
+            &app,
+            json_request(Method::POST, "/api/study/questions", None, body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["questions"].as_array().unwrap().len(), 3);
+    }
+    for change in [
+        json!({"types": []}),
+        json!({"types": ["Unknown"]}),
+        json!({"types": ["Verse"]}),
+        json!({"books": []}),
+        json!({"books": [{"name": "John", "start_chapter": 3, "end_chapter": 3}]}),
+    ] {
+        let mut invalid = body.clone();
+        invalid
+            .as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        let (status, _) = send(
+            &app,
+            json_request(Method::POST, "/api/study/questions", None, invalid),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 0);
+    let (status, _) = send(&app, get("/study", None)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn study_enforces_private_and_shared_pool_access(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let high = create_tier(&pool, "high", 2).await;
+    let private: i32 = sqlx::query_scalar("SELECT id FROM tiers WHERE rank = -1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let owner = create_user(&pool, "owner", public, false, true).await;
+    let other = create_user(&pool, "other", high, false, true).await;
+    let admin = create_user(&pool, "admin", public, true, false).await;
+    let owner_session = session(&pool, owner).await;
+    let other_session = session(&pool, other).await;
+    let admin_session = session(&pool, admin).await;
+    let private_pool = create_pool(&pool, "private-study", private).await;
+    sqlx::query("UPDATE question_pools SET created_by = $1 WHERE id = $2")
+        .bind(owner)
+        .bind(private_pool)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let high_pool = create_pool(&pool, "high-study", high).await;
+    for (pool_id, caller, expected) in [
+        (private_pool, None, StatusCode::FORBIDDEN),
+        (
+            private_pool,
+            Some(other_session.as_str()),
+            StatusCode::FORBIDDEN,
+        ),
+        (private_pool, Some(owner_session.as_str()), StatusCode::OK),
+        (private_pool, Some(admin_session.as_str()), StatusCode::OK),
+        (
+            high_pool,
+            Some(owner_session.as_str()),
+            StatusCode::FORBIDDEN,
+        ),
+        (high_pool, Some(other_session.as_str()), StatusCode::OK),
+    ] {
+        let (status, _) = send(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/study/questions",
+                caller,
+                json!({
+                    "pool_id": pool_id, "types": ["General"], "count": 1,
+                    "books": [{"name": "John", "start_chapter": 1, "end_chapter": 1}],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+}
+
+#[sqlx::test]
 async fn uploaders_cannot_assign_a_tier_above_their_own(pool: PgPool) {
     let app = app(&pool);
     let district = create_tier(&pool, "district", 1).await;

@@ -190,6 +190,7 @@ p { margin: 0; }
   place-items: center;
   width: 1.75rem;
   height: 1.75rem;
+  flex-shrink: 0;
   border-radius: 50%;
   background: var(--accent-tint);
   color: var(--accent);
@@ -197,6 +198,10 @@ p { margin: 0; }
   font-weight: 700;
   font-size: 0.95rem;
   line-height: 1;
+}
+
+.user-avatar > span {
+  text-box: trim-both cap alphabetic;
 }
 
 .user-name {
@@ -657,6 +662,31 @@ input[type="radio"]:checked::after { transform: scale(1); }
 #pool-section, #bookSelection { overflow-x: auto; }
 
 /* ── Options grid ── */
+.study-passage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.study-passage input[type="number"] { width: 5rem; }
+#studyTypes { margin-bottom: 1rem; }
+#studyTimer { font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+#studyTimer.study-time-expired { color: var(--danger); }
+#studyAnswer { width: 100%; font: inherit; }
+#studyStats { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem 1rem; }
+#studyExpected, #studySubmitted { white-space: pre-wrap; overflow-wrap: anywhere; }
+#studyFinish { margin-top: 1.5rem; }
+
+.csv-format-help {
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.csv-format-help summary { cursor: pointer; }
+.csv-format-help pre { overflow-x: auto; }
+
 .options-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1012,7 +1042,8 @@ input[type="radio"]:checked::after { transform: scale(1); }
 
 /* ── Responsive ── */
 @media (max-width: 860px) {
-  .site-nav { display: none; }
+  .site-nav { gap: 0.6rem; }
+  .site-nav .related-tool { display: none; }
   .account-nav { padding-left: 0; border-left: none; }
 }
 

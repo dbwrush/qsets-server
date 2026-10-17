@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Study — QSets</title>
+  <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/style.css?v=study-1" />
+</head>
+<body data-csrf="{{ csrf_token }}">
+  {% include "_header.html" %}
+  <main>
+    <section class="page-intro">
+      <p class="eyebrow">Practice at quiz pace</p>
+      <h1 class="page-title">Study</h1>
+      <p>20 seconds to submit each answer.</p>
+    </section>
+    <section class="panel" id="studySetup">
+      <h2>Choose your questions</h2>
+      <form id="studySetupForm">
+        <div class="form-group"><label for="studyPool">Question pool</label><select id="studyPool" required disabled></select></div>
+        <div id="studyPassages"></div>
+        <fieldset><legend>Question types</legend><div id="studyTypes" class="options-grid"></div></fieldset>
+        <div class="form-group"><label for="studyCount">Session length (0 for all matching questions)</label><input id="studyCount" type="number" min="0" step="1" value="20" required /></div>
+        <p id="studySetupStatus" role="status"></p>
+        <button class="btn-primary" id="studyStart" disabled>Start studying</button>
+      </form>
+    </section>
+    <section class="panel" id="studyQuestion" hidden>
+      <p id="studyProgress"></p>
+      <p id="studyTimer" role="timer" aria-label="Time remaining"></p>
+      <p id="studyExpired" role="status"></p>
+      <p id="studyType" class="eyebrow"></p>
+      <h2 id="studyPrompt" tabindex="-1"></h2>
+      <form id="studyAnswerForm">
+        <div class="form-group"><label for="studyAnswer">Your answer</label><textarea id="studyAnswer" rows="4" required></textarea></div>
+        <button class="btn-primary">Submit answer</button>
+        <button type="button" id="studyReveal">Reveal / skip</button>
+      </form>
+      <div id="studyFeedback" hidden>
+        <p id="studySubmitted"></p>
+        <h3>Expected answer</h3><p id="studyExpected"></p><p id="studyReference"></p>
+        <p id="studyAssessment" role="status"></p>
+        <div id="studySelfGrade" hidden>
+          <p>Different wording can still be correct. Compare your answer and choose:</p>
+          <button type="button" id="studyCorrect">Mark correct</button>
+          <button type="button" id="studyIncorrect">Needs practice</button>
+        </div>
+        <button type="button" id="studyNext" class="btn-primary" hidden>Next question</button>
+      </div>
+      <button type="button" id="studyFinish" class="btn-ghost">End session</button>
+    </section>
+    <section class="panel" id="studySummary" hidden>
+      <h2 tabindex="-1" id="studySummaryTitle">Session complete</h2>
+      <p id="studySummaryText"></p>
+      <dl id="studyStats"></dl>
+      <button type="button" id="studyReview">Review missed / late questions</button>
+      <button type="button" id="studyAgain">Study again</button>
+      <a href="/">Home</a>
+    </section>
+  </main>
+  <script src="/static/header.js"></script>
+  <script type="module" src="/static/study.js"></script>
+</body>
+</html>
