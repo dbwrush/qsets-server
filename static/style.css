@@ -662,6 +662,16 @@ input[type="radio"]:checked::after { transform: scale(1); }
 #pool-section, #bookSelection { overflow-x: auto; }
 
 /* ── Options grid ── */
+.editor-question {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+}
+
+.editor-question textarea { width: 100%; font: inherit; }
+#editorFields { border: 0; padding: 0; margin: 0; min-width: 0; }
+
 .study-passage {
   display: flex;
   flex-wrap: wrap;

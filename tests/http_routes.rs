@@ -334,7 +334,7 @@ async fn private_pools_are_hidden_from_everyone_except_owner_and_admin(pool: PgP
     .await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(&app, replace_request(&owner_session, id as i32, SAMPLE_CSV)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &app,
         upload_request(&reader_session, "not-allowed", private, SAMPLE_CSV),
@@ -608,6 +608,222 @@ async fn study_enforces_private_and_shared_pool_access(pool: PgPool) {
         .await;
         assert_eq!(status, expected);
     }
+}
+
+#[sqlx::test]
+async fn online_pool_editor_creates_edits_and_preserves_ownership(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let private: i32 = sqlx::query_scalar("SELECT id FROM tiers WHERE rank = -1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let high = create_tier(&pool, "high-editor", 3).await;
+    let owner = create_user(&pool, "editor-owner", public, false, true).await;
+    let other = create_user(&pool, "other-editor", high, false, true).await;
+    let admin = create_user(&pool, "editor-admin", public, true, false).await;
+    let owner_session = session(&pool, owner).await;
+    let other_session = session(&pool, other).await;
+    let admin_session = session(&pool, admin).await;
+    let question = json!({"question": "Who said, \"hello\"?\nNext line", "type": "General", "reference": "John 1:1", "answer": "An answer, with commas"});
+    let create =
+        json!({"name": "Online pool", "tier_id": private, "questions": [question.clone()]});
+    let (status, created) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/pools/create",
+            Some(&owner_session),
+            create.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_i64().unwrap();
+    let uri = format!("/api/pools/{id}/editor");
+    let (_, loaded) = send(&app, get(&uri, Some(&owner_session))).await;
+    assert_eq!(loaded["questions"][0], question);
+    let (_, books) = send(
+        &app,
+        get(&format!("/api/pools/{id}/books"), Some(&owner_session)),
+    )
+    .await;
+    assert_eq!(books["books"][0]["name"], "John");
+    for caller in [None, Some(other_session.as_str())] {
+        let (status, _) = send(&app, get(&uri, caller)).await;
+        assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN);
+        let (status, _) = send(
+            &app,
+            json_request(Method::PUT, &uri, caller, create.clone()),
+        )
+        .await;
+        assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN);
+    }
+    sqlx::query("UPDATE users SET can_upload_pools = FALSE WHERE id = $1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let header = header_html(&app, "/", Some(&owner_session)).await;
+    assert!(header.contains(r#"href="/pools""#));
+    let (status, _) = send(&app, get("/pools", Some(&owner_session))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/pools/create",
+            Some(&owner_session),
+            create.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let edit = json!({
+        "name": "Edited online", "tier_id": public, "updated_at": loaded["updated_at"],
+        "questions": [
+            {"question": "Updated", "type": "Quote", "reference": "Luke 4:1", "answer": "Changed"},
+            {"question": "Added", "type": "General", "reference": "Luke 5:1", "answer": "New"},
+        ],
+    });
+    let (status, saved) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&owner_session), edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (_, current) = send(&app, get(&uri, Some(&admin_session))).await;
+    assert_eq!(current["name"], "Edited online");
+    assert_eq!(current["questions"].as_array().unwrap().len(), 2);
+    let (_, books) = send(&app, get(&format!("/api/pools/{id}/books"), None)).await;
+    assert_eq!(books["books"][0]["name"], "Luke");
+    let mut admin_edit = edit.clone();
+    admin_edit["updated_at"] = current["updated_at"].clone();
+    admin_edit["tier_id"] = json!(high);
+    admin_edit["questions"] = json!([edit["questions"][1]]);
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), admin_edit),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, current) = send(&app, get(&uri, Some(&owner_session))).await;
+    assert_eq!(current["questions"].as_array().unwrap().len(), 1);
+    let (_, managed) = send(&app, get("/api/pools/managed", Some(&owner_session))).await;
+    assert_eq!(managed["pools"][0]["id"], id);
+    let (status, _) = send(
+        &app,
+        get(&format!("/api/pools/{id}/books"), Some(&owner_session)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let mut unchanged = edit.clone();
+    unchanged["tier_id"] = json!(high);
+    unchanged["updated_at"] = current["updated_at"].clone();
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&owner_session), unchanged),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let uploader: i32 = sqlx::query_scalar("SELECT created_by FROM question_pools WHERE id = $1")
+        .bind(id as i32)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(uploader, owner);
+}
+
+#[sqlx::test]
+async fn online_pool_editor_rejects_invalid_data_and_tier_escalation(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let high = create_tier(&pool, "high", 2).await;
+    let owner = create_user(&pool, "editor", public, false, true).await;
+    let token = session(&pool, owner).await;
+    let valid = json!({
+        "name": "Valid online pool", "tier_id": public,
+        "questions": [{"question": "Question", "type": "General", "reference": "John 1:1", "answer": "Answer"}],
+    });
+    for (path, value) in [
+        ("/name", json!(" ")),
+        ("/questions", json!([])),
+        ("/questions/0/question", json!("")),
+        ("/questions/0/reference", json!("invalid")),
+        ("/questions/0/type", json!("Unknown")),
+        ("/questions/0/answer", json!(" ")),
+        ("/questions/0/question", json!("LICENSE skipped")),
+        ("/tier_id", json!(999999)),
+    ] {
+        let mut body = valid.clone();
+        *body.pointer_mut(path).unwrap() = value;
+        let (status, _) = send(
+            &app,
+            json_request(Method::POST, "/api/pools/create", Some(&token), body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+    }
+    let mut elevated = valid.clone();
+    elevated["tier_id"] = json!(high);
+    let (status, _) = send(
+        &app,
+        json_request(Method::POST, "/api/pools/create", Some(&token), elevated),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, created) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/pools/create",
+            Some(&token),
+            valid.clone(),
+        ),
+    )
+    .await;
+    let (status, _) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/pools/create",
+            Some(&token),
+            valid.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let uri = format!("/api/pools/{}/editor", created["id"]);
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&token), valid.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut edit = valid;
+    edit["updated_at"] = created["updated_at"].clone();
+    edit["tier_id"] = json!(high);
+    let (status, _) = send(&app, json_request(Method::PUT, &uri, Some(&token), edit)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, data) = send(&app, get(&uri, Some(&token))).await;
+    assert_eq!(data["tier_id"], public);
+    sqlx::query("UPDATE question_pools SET csv_text = csv_text || 'broken row' WHERE id = $1")
+        .bind(created["id"].as_i64().unwrap() as i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(&app, get(&uri, Some(&token))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("avoid losing rows"));
 }
 
 #[sqlx::test]

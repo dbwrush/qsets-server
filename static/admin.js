@@ -53,6 +53,8 @@ async function loadAssignableTiers() {
   try {
     const data = await adminApi("/api/tiers");
     assignableTiers = data.tiers || [];
+    document.getElementById("pool-upload-area").hidden = !data.can_upload_pools;
+    document.getElementById("create-pool-link").hidden = !data.can_upload_pools;
     if (select) select.innerHTML = tierOptionsHtml(assignableTiers);
   } catch (err) {
     if (select) select.innerHTML = "";
@@ -103,8 +105,8 @@ async function loadManagedPools() {
   if (!container) return;
   container.innerHTML = '<p class="msg-info">Loading…</p>';
   try {
-    const data = await adminApi("/api/pools");
-    renderPoolsTable((data.pools || []).filter(p => p.can_manage), container);
+    const data = await adminApi("/api/pools/managed");
+    renderPoolsTable(data.pools || [], container);
   } catch (err) {
     container.innerHTML = `<p class="msg-error">${escapeHtml(err.message)}</p>`;
   }
@@ -121,8 +123,9 @@ function renderPoolsTable(pools, container) {
       <td>${escapeHtml(p.created_by_username || "Unknown / deleted user")}</td>
       <td>${escapeHtml(new Date(p.updated_at).toLocaleString())}</td>
       <td class="admin-actions">
+        <a href="/pools/${p.id}/edit">Edit</a>
         <button class="btn-icon replace-pool" title="Replace CSV">&#8635;</button>
-        <button class="btn-icon danger delete-pool" title="Delete">&#128465;</button>
+        ${p.can_manage ? '<button class="btn-icon danger delete-pool" title="Delete">&#128465;</button>' : ""}
       </td>
     </tr>`;
   });

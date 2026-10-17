@@ -40,6 +40,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_own_password))
         .route("/api/pools", get(list_pools).post(upload_pool))
+        .route("/api/pools/managed", get(list_managed_pools))
+        .route("/api/pools/create", post(create_pool_online))
+        .route(
+            "/api/pools/:id/editor",
+            get(pool_editor).put(save_pool_editor),
+        )
         .route("/api/pools/:id", put(replace_pool).delete(delete_pool))
         .route("/api/pools/:id/books", get(pool_books))
         .route("/api/tiers", get(list_assignable_tiers))
@@ -354,7 +360,7 @@ async fn list_assignable_tiers(State(state): State<AppState>, actor: Actor) -> A
     .bind(actor.is_admin)
     .bind(actor.tier_rank)
     .bind(authz::PRIVATE_TIER_RANK)
-    .bind(authz::can_upload(&actor))
+    .bind(actor.user_id.is_some())
     .fetch_all(&state.pool)
     .await
     .map_err(db_error("Failed to load tiers"))?;
@@ -366,6 +372,15 @@ async fn list_assignable_tiers(State(state): State<AppState>, actor: Actor) -> A
 }
 
 async fn list_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
+    pool_listing(&state, &actor, false).await
+}
+
+async fn list_managed_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
+    require_user(&actor)?;
+    pool_listing(&state, &actor, true).await
+}
+
+async fn pool_listing(state: &AppState, actor: &Actor, managed: bool) -> ApiResult {
     #[derive(sqlx::FromRow)]
     struct PoolRow {
         id: i32,
@@ -384,14 +399,16 @@ async fn list_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
          LEFT JOIN users u ON u.id = qp.created_by
-         WHERE $1 OR (t.rank <> $3 AND t.rank <= $2)
-             OR (t.rank = $3 AND qp.created_by = $4)
+         WHERE $1 OR ($5 AND qp.created_by = $4)
+             OR (NOT $5 AND ((t.rank <> $3 AND t.rank <= $2)
+                 OR (t.rank = $3 AND qp.created_by = $4)))
          ORDER BY qp.created_at DESC",
     )
     .bind(actor.is_admin)
     .bind(actor.tier_rank)
     .bind(authz::PRIVATE_TIER_RANK)
     .bind(actor.user_id)
+    .bind(managed)
     .fetch_all(&state.pool)
     .await
     .map_err(db_error("Failed to load pools"))?;
@@ -408,7 +425,8 @@ async fn list_pools(State(state): State<AppState>, actor: Actor) -> ApiResult {
                 "updated_at": p.updated_at,
                 "created_by": p.created_by,
                 "created_by_username": p.created_by_username,
-                "can_manage": authz::can_manage_pool(&actor, p.created_by, p.tier_rank),
+                "can_manage": authz::can_manage_pool(actor, p.created_by, p.tier_rank),
+                "can_edit": authz::can_edit_pool(actor, p.created_by),
             })
         })
         .collect();
@@ -460,6 +478,187 @@ fn validation_summary(validation: &generator::CsvValidation) -> Value {
         "skipped_count": validation.skipped_count,
         "warnings": validation.warnings,
     })
+}
+
+#[derive(Deserialize)]
+struct PoolEditorBody {
+    name: String,
+    tier_id: i32,
+    questions: Vec<generator::QuestionRecord>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn editor_tiers(
+    state: &AppState,
+    actor: &Actor,
+    current: Option<i32>,
+) -> ApiResult<Vec<Tier>> {
+    sqlx::query_as::<_, Tier>(
+        "SELECT id, name, rank FROM tiers
+         WHERE $1 OR rank = -1 OR (rank >= 0 AND rank <= $2) OR id = $3 ORDER BY rank",
+    )
+    .bind(actor.is_admin)
+    .bind(actor.tier_rank)
+    .bind(current)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(db_error("Failed to load editor tiers"))
+}
+
+async fn pool_editor(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i32>,
+) -> ApiResult {
+    require_user(&actor)?;
+    let pool = load_pool(&state, id).await?;
+    if !authz::can_edit_pool(&actor, pool.created_by) {
+        return Err(ApiError::forbidden("You cannot edit this pool"));
+    }
+    let csv: String =
+        sqlx::query_scalar("SELECT csv_text FROM question_pools WHERE id = $1 AND updated_at = $2")
+            .bind(id)
+            .bind(pool.updated_at)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(db_error("Failed to load pool questions"))?
+            .ok_or_else(|| ApiError::conflict("This pool changed. Reload the editor."))?;
+    let validation = generator::validate_csv(&csv);
+    if !validation.errors.is_empty() || validation.skipped_count > 0 {
+        return Err(ApiError::bad_request(
+            "This CSV contains invalid or skipped rows. Replace it with a cleaned CSV before editing to avoid losing rows.",
+        ));
+    }
+    let tiers = editor_tiers(&state, &actor, Some(pool.tier_id)).await?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "id": pool.id, "name": pool.name, "tier_id": pool.tier_id,
+            "updated_at": pool.updated_at, "questions": generator::parse_csv(&csv),
+            "tiers": tiers,
+        })),
+    )
+        .into_response())
+}
+
+async fn validate_editor_body(
+    state: &AppState,
+    actor: &Actor,
+    body: &PoolEditorBody,
+    current: Option<i32>,
+) -> ApiResult<String> {
+    if body.name.trim().is_empty() {
+        return Err(ApiError::bad_request("Pool name must not be empty"));
+    }
+    let rank = authz::tier_rank(&state.pool, body.tier_id)
+        .await
+        .map_err(db_error("Failed to validate tier"))?
+        .ok_or_else(|| ApiError::bad_request("Unknown tier"))?;
+    if !actor.is_admin
+        && Some(body.tier_id) != current
+        && rank != authz::PRIVATE_TIER_RANK
+        && rank > actor.tier_rank
+    {
+        return Err(ApiError::forbidden(
+            "You cannot publish a pool above your own tier",
+        ));
+    }
+    let csv = generator::questions_to_csv(&body.questions).map_err(ApiError::bad_request)?;
+    if csv.len() > MAX_POOL_UPLOAD_BYTES {
+        return Err(ApiError::bad_request("Pool CSV exceeds 10 MB"));
+    }
+    Ok(csv)
+}
+
+fn pool_write_error(error: sqlx::Error) -> ApiError {
+    if is_unique_violation(&error) {
+        ApiError::conflict("A pool with that name already exists; choose another name")
+    } else {
+        db_error("Failed to save pool")(error)
+    }
+}
+
+async fn create_pool_online(
+    State(state): State<AppState>,
+    client: ClientMeta,
+    actor: Actor,
+    Json(body): Json<PoolEditorBody>,
+) -> ApiResult {
+    let user_id = require_user(&actor)?;
+    if !authz::can_upload(&actor) {
+        return Err(ApiError::forbidden(
+            "You do not have permission to create question pools",
+        ));
+    }
+    let csv = validate_editor_body(&state, &actor, &body, None).await?;
+    let (id, updated_at): (i32, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "INSERT INTO question_pools (name, tier_id, csv_text, created_by)
+         VALUES ($1, $2, $3, $4) RETURNING id, updated_at",
+    )
+    .bind(body.name.trim())
+    .bind(body.tier_id)
+    .bind(csv)
+    .bind(user_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(pool_write_error)?;
+    audit::record(
+        &state.pool,
+        &client,
+        Some(user_id),
+        "pool.created",
+        "question_pool",
+        id,
+        json!({"name": body.name.trim(), "tier_id": body.tier_id, "count": body.questions.len()}),
+    )
+    .await;
+    ok(json!({"id": id, "updated_at": updated_at}))
+}
+
+async fn save_pool_editor(
+    State(state): State<AppState>,
+    client: ClientMeta,
+    actor: Actor,
+    Path(id): Path<i32>,
+    Json(body): Json<PoolEditorBody>,
+) -> ApiResult {
+    let user_id = require_user(&actor)?;
+    let pool = load_pool(&state, id).await?;
+    if !authz::can_edit_pool(&actor, pool.created_by) {
+        return Err(ApiError::forbidden("You cannot edit this pool"));
+    }
+    let version = body
+        .updated_at
+        .ok_or_else(|| ApiError::bad_request("Missing pool version; reload the editor"))?;
+    let csv = validate_editor_body(&state, &actor, &body, Some(pool.tier_id)).await?;
+    let updated_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "UPDATE question_pools SET name = $1, tier_id = $2, csv_text = $3,
+             updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+         WHERE id = $4 AND updated_at = $5 RETURNING updated_at",
+    )
+    .bind(body.name.trim())
+    .bind(body.tier_id)
+    .bind(csv)
+    .bind(id)
+    .bind(version)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(pool_write_error)?
+    .ok_or_else(|| {
+        ApiError::conflict("This pool was changed or deleted. Reload the editor before saving.")
+    })?;
+    state.parsed_pools.write().await.remove(id);
+    audit::record(
+        &state.pool,
+        &client,
+        Some(user_id),
+        "pool.edited",
+        "question_pool",
+        id,
+        json!({"name": body.name.trim(), "tier_id": body.tier_id, "count": body.questions.len()}),
+    )
+    .await;
+    ok(json!({"id": id, "updated_at": updated_at}))
 }
 
 async fn upload_pool(
@@ -547,7 +746,7 @@ async fn replace_pool(
 ) -> ApiResult {
     let user_id = require_user(&actor)?;
     let pool = load_pool(&state, id).await?;
-    if !authz::can_manage_pool(&actor, pool.created_by, pool.tier_rank) {
+    if !authz::can_edit_pool(&actor, pool.created_by) {
         return Err(ApiError::forbidden("You cannot replace this pool"));
     }
 
