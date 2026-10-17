@@ -160,7 +160,28 @@ Usernames chosen at registration cannot contain `@`, so a username is never mist
 ### Tiers
 
 Anonymous visitors read at rank 0, so the tier with rank 0 is the public tier. It can be
-renamed but not re-ranked or deleted, and no tier may have a negative rank.
+renamed but not re-ranked or deleted. Shared tiers cannot have a negative rank.
+
+The built-in `private` tier is a pool-only access mode (reserved rank -1), not a
+level in the shared hierarchy. Only the uploader and admins can list its pools,
+read their books, validate custom configurations, or generate questions from them.
+Higher user tiers do not grant private access. Private cannot be renamed, re-ranked,
+deleted, or assigned to a user. Migration `0005_private_pool_tier.sql` adds it;
+the name `private` and rank -1 must not already be used by custom tiers.
+
+### Uploading and managing pools
+
+Users with **Can upload pools** permission (and admins) have a **My pools** link
+in their account menu at `/pools`. They can upload a CSV, replace its questions,
+or delete their own pools. `/admin` remains available for admins and as a
+compatibility URL for uploaders; non-admins never see user, tier, or audit tools.
+Shared uploads are limited to the uploader's tier or lower; choosing **private**
+keeps the pool visible only to its uploader and admins. The management table
+shows who uploaded each pool, including private pools viewed by admins.
+
+Revoking upload permission prevents new uploads and replacement/deletion, but an
+owner can still read and generate from their private pools. Pools whose uploader
+has been deleted remain visible only to admins and show an unknown/deleted owner.
 
 ## Run
 

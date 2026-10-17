@@ -20,6 +20,7 @@ struct Header {
     /// First letter of the username, shown in the menu button's avatar.
     initial: String,
     can_access_admin: bool,
+    can_manage_pools: bool,
 }
 
 impl Header {
@@ -31,7 +32,8 @@ impl Header {
                 .and_then(|u| u.username.chars().next())
                 .map(|c| c.to_uppercase().collect())
                 .unwrap_or_default(),
-            can_access_admin: user.is_some_and(|u| u.is_admin || u.can_upload_pools),
+            can_access_admin: user.is_some_and(|u| u.is_admin),
+            can_manage_pools: user.is_some_and(|u| u.is_admin || u.can_upload_pools),
         }
     }
 }
@@ -114,6 +116,7 @@ pub fn router(state: AppState) -> Router {
         .route("/verify-email", get(verify_email_page))
         .route("/account", get(account_page))
         .route("/admin", get(admin_page))
+        .route("/pools", get(admin_page))
         .with_state(state)
 }
 

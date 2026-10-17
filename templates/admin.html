@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>QSets Admin</title>
+  <title>{% if is_admin %}QSets Admin{% else %}My pools — QSets{% endif %}</title>
   <script src="/static/theme.js"></script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/style.css" />
@@ -13,8 +13,8 @@
 
   <main>
     <section class="page-intro">
-      <p class="eyebrow">Administration</p>
-      <h1 class="page-title">Manage QSets</h1>
+      <p class="eyebrow">{% if is_admin %}Administration{% else %}Question pools{% endif %}</p>
+      <h1 class="page-title">{% if is_admin %}Manage QSets{% else %}My pools{% endif %}</h1>
     </section>
 
     <div class="panel">
@@ -39,7 +39,7 @@
           <div class="form-group">
             <label for="upload-tier">Tier</label>
             <select name="tier_id" id="upload-tier" required></select>
-            <small class="form-hint">You can only publish pools at your own tier or lower.</small>
+            <small class="form-hint">Private pools are visible only to you and admins. Shared pools can be published at your own tier or lower.</small>
           </div>
           <div class="form-group">
             <label>CSV File</label>
@@ -49,7 +49,7 @@
         </form>
         <div id="upload-status"></div>
 
-        <h3>Your pools</h3>
+        <h3>{% if is_admin %}All pools{% else %}Your pools{% endif %}</h3>
         <p class="form-hint">Replacing a pool swaps in a new CSV and keeps its name and tier.</p>
         <input type="file" id="replace-file" accept=".csv" hidden />
         <div id="replace-status"></div>
@@ -139,6 +139,6 @@
   </footer>
 
   <script src="/static/header.js"></script>
-  <script src="/static/admin.js"></script>
+  <script src="/static/admin.js?v=private-pools-1"></script>
 </body>
 </html>

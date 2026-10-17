@@ -219,6 +219,265 @@ async fn pools_above_the_callers_tier_are_hidden_and_forbidden(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn private_pools_are_hidden_from_everyone_except_owner_and_admin(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let private: i32 = sqlx::query_scalar("SELECT id FROM tiers WHERE name = 'private'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let high = create_tier(&pool, "high", 50).await;
+    let owner = create_user(&pool, "pool-owner", public, false, true).await;
+    let other = create_user(&pool, "other-uploader", high, false, true).await;
+    let admin = create_user(&pool, "admin", public, true, false).await;
+    let reader = create_user(&pool, "reader", public, false, false).await;
+    let owner_session = session(&pool, owner).await;
+    let other_session = session(&pool, other).await;
+    let admin_session = session(&pool, admin).await;
+    let reader_session = session(&pool, reader).await;
+
+    let (status, uploaded) = send(
+        &app,
+        upload_request(&owner_session, "owner-private", private, SAMPLE_CSV),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    let id = uploaded["id"].as_i64().unwrap();
+    for caller in [
+        None,
+        Some(other_session.as_str()),
+        Some(reader_session.as_str()),
+    ] {
+        let (status, body) = send(&app, get("/api/pools", caller)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!pool_names(&body).contains(&"owner-private".to_string()));
+        let (status, _) = send(&app, get(&format!("/api/pools/{id}/books"), caller)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        for uri in ["/api/generate", "/api/generate/validate"] {
+            let (status, _) = send(
+                &app,
+                json_request(
+                    Method::POST,
+                    uri,
+                    caller,
+                    json!({
+                        "pool_id": id, "question_type": "custom", "count": 1,
+                        "custom_counts": {"General": 1},
+                        "books": [{"name": "John", "start_chapter": 1, "end_chapter": 1}],
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+    for caller in [&owner_session, &admin_session] {
+        let (status, body) = send(&app, get("/api/pools", Some(caller))).await;
+        assert_eq!(status, StatusCode::OK);
+        let found = body["pools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .unwrap();
+        assert_eq!(found["tier_name"], "private");
+        assert_eq!(found["created_by"], owner);
+        assert_eq!(found["created_by_username"], "pool-owner");
+        assert_eq!(found["can_manage"], true);
+        assert!(found.get("csv_text").is_none());
+        let (status, _) = send(&app, get(&format!("/api/pools/{id}/books"), Some(caller))).await;
+        assert_eq!(status, StatusCode::OK);
+        for uri in ["/api/generate", "/api/generate/validate"] {
+            let (status, _) = send(
+                &app,
+                json_request(
+                    Method::POST,
+                    uri,
+                    Some(caller),
+                    json!({
+                        "pool_id": id, "question_type": "custom", "count": 1,
+                        "custom_counts": {"General": 1},
+                        "books": [{"name": "John", "start_chapter": 1, "end_chapter": 1}],
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+        }
+    }
+    let (status, _) = send(&app, replace_request(&other_session, id as i32, SAMPLE_CSV)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &app,
+        request(
+            Method::DELETE,
+            &format!("/api/pools/{id}"),
+            Some(&other_session),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(&app, replace_request(&owner_session, id as i32, SAMPLE_CSV)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    sqlx::query("UPDATE users SET can_upload_pools = FALSE WHERE id = $1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = send(
+        &app,
+        get(&format!("/api/pools/{id}/books"), Some(&owner_session)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, replace_request(&owner_session, id as i32, SAMPLE_CSV)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &app,
+        upload_request(&reader_session, "not-allowed", private, SAMPLE_CSV),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        &app,
+        upload_request(&owner_session, "revoked", private, SAMPLE_CSV),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(&app, get("/api/pools", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["pools"].as_array().unwrap().is_empty());
+    let (_, body) = send(&app, get("/api/pools", Some(&admin_session))).await;
+    assert_eq!(body["pools"][0]["created_by_username"], Value::Null);
+    let (status, _) = send(&app, replace_request(&admin_session, id as i32, SAMPLE_CSV)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        request(
+            Method::DELETE,
+            &format!("/api/pools/{id}"),
+            Some(&admin_session),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn private_tier_is_pool_only_and_cannot_be_changed(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let private: i32 = sqlx::query_scalar("SELECT id FROM tiers WHERE name = 'private'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let admin = create_user(&pool, "admin", public, true, true).await;
+    let uploader = create_user(&pool, "uploader", public, false, true).await;
+    let admin_session = session(&pool, admin).await;
+    let uploader_session = session(&pool, uploader).await;
+    let (_, body) = send(&app, get("/api/tiers", Some(&uploader_session))).await;
+    assert!(body["tiers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == private));
+    let (_, body) = send(&app, get("/api/tiers", None)).await;
+    assert!(!body["tiers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == private));
+    for (method, uri, body) in [
+        (
+            Method::PUT,
+            format!("/api/admin/tiers/{private}"),
+            json!({"name": "shared", "rank": 1}),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/admin/tiers/{private}"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            "/api/admin/tiers".to_string(),
+            json!({"name": "PRIVATE", "rank": 1}),
+        ),
+        (
+            Method::PUT,
+            format!("/api/admin/tiers/{public}"),
+            json!({"name": "Private", "rank": 0}),
+        ),
+        (
+            Method::POST,
+            "/api/admin/users".to_string(),
+            json!({
+                "username": "bad-user", "password": PASSWORD, "tier_id": private, "is_admin": false,
+            }),
+        ),
+        (
+            Method::PUT,
+            format!("/api/admin/users/{uploader}"),
+            json!({
+                "username": "uploader", "tier_id": private, "is_admin": false,
+            }),
+        ),
+    ] {
+        let (status, body) =
+            send(&app, json_request(method, &uri, Some(&admin_session), body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    }
+}
+
+#[sqlx::test]
+async fn uploaders_have_a_non_admin_pool_management_page(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let uploader = create_user(&pool, "uploader", public, false, true).await;
+    let reader = create_user(&pool, "reader", public, false, false).await;
+    let uploader_session = session(&pool, uploader).await;
+    let reader_session = session(&pool, reader).await;
+    let header = header_html(&app, "/", Some(&uploader_session)).await;
+    assert!(header.contains(r#"href="/pools""#));
+    assert!(!header.contains(r#"href="/admin""#));
+    let response = app
+        .clone()
+        .oneshot(get("/pools", Some(&uploader_session)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("My pools"));
+    assert!(html.contains(r#"id="upload-form""#));
+    assert!(!html.contains(r#"id="user-form""#));
+    assert!(!html.contains(r#"id="tier-form""#));
+    let (status, _) = send(&app, get("/pools", Some(&reader_session))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let response = app.oneshot(get("/pools", None)).await.unwrap();
+    assert_eq!(response.headers()[header::LOCATION], "/login");
+}
+
+#[sqlx::test]
 async fn uploaders_cannot_assign_a_tier_above_their_own(pool: PgPool) {
     let app = app(&pool);
     let district = create_tier(&pool, "district", 1).await;
