@@ -36,8 +36,8 @@ fn seeded_generation_is_deterministic() {
         seed: Some(12345),
     };
 
-    let a = generate_questions(&parsed, &req);
-    let b = generate_questions(&parsed, &req);
+    let a = generate_questions(&parsed, &req).unwrap();
+    let b = generate_questions(&parsed, &req).unwrap();
 
     assert_eq!(a.len(), 20);
     assert_eq!(a, b);
@@ -54,7 +54,7 @@ fn standard_set_matches_required_type_counts() {
         seed: Some(99),
     };
 
-    let set = generate_questions(&parsed, &req);
+    let set = generate_questions(&parsed, &req).unwrap();
     assert_eq!(set.len(), 20);
 
     let mut counts: HashMap<String, usize> = HashMap::new();

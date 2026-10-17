@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
 };
 
 use csv::StringRecord;
@@ -22,6 +22,42 @@ pub struct GenerateRequest {
     pub count: usize,
     pub situation: Option<bool>,
     pub seed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CustomCounts {
+    #[serde(rename = "Situation")]
+    pub situation: usize,
+    #[serde(rename = "In-What-Book-and-Chapter")]
+    pub in_what_book_and_chapter: usize,
+    #[serde(rename = "Quote")]
+    pub quote: usize,
+    #[serde(rename = "Reference")]
+    pub reference: usize,
+    #[serde(rename = "Verse")]
+    pub verse: usize,
+    #[serde(rename = "Context")]
+    pub context: usize,
+    #[serde(rename = "According-To")]
+    pub according_to: usize,
+    #[serde(rename = "General")]
+    pub general: usize,
+}
+
+impl CustomCounts {
+    fn requirements(&self) -> [(&'static str, usize); 8] {
+        [
+            ("Situation", self.situation),
+            ("In-What-Book-and-Chapter", self.in_what_book_and_chapter),
+            ("Quote", self.quote),
+            ("Reference", self.reference),
+            ("Verse", self.verse),
+            ("Context", self.context),
+            ("According-To", self.according_to),
+            ("General", self.general),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -147,6 +183,19 @@ const VALID_TYPES: &[&str] = &[
     "According-To",
     "General",
 ];
+
+pub fn available_type_counts(pool: &[QuestionRecord]) -> HashMap<&'static str, usize> {
+    let mut counts: HashMap<_, _> = VALID_TYPES.iter().map(|qtype| (*qtype, 0)).collect();
+    for q in pool {
+        if let Some(qtype) = VALID_TYPES
+            .iter()
+            .find(|qtype| q.qtype.eq_ignore_ascii_case(qtype))
+        {
+            *counts.get_mut(qtype).unwrap() += 1;
+        }
+    }
+    counts
+}
 
 const REQUIRED_TYPES_FOR_STANDARD: &[&str] = &[
     "Situation",
@@ -358,7 +407,13 @@ pub fn parse_csv(csv_text: &str) -> Vec<QuestionRecord> {
     out
 }
 
-pub fn generate_questions(pool: &[QuestionRecord], req: &GenerateRequest) -> Vec<QuestionRecord> {
+pub fn generate_questions(
+    pool: &[QuestionRecord],
+    req: &GenerateRequest,
+) -> Result<Vec<QuestionRecord>, String> {
+    if req.question_type.eq_ignore_ascii_case("custom") {
+        return Err("Custom generation requires custom_counts".to_string());
+    }
     if req.question_type.eq_ignore_ascii_case("standard") {
         return generate_standard_set(pool, req.situation.unwrap_or(true), req.seed);
     }
@@ -370,7 +425,7 @@ pub fn generate_questions(pool: &[QuestionRecord], req: &GenerateRequest) -> Vec
         .collect();
 
     if filtered.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
 
     let mut rng: StdRng = match req.seed {
@@ -380,14 +435,179 @@ pub fn generate_questions(pool: &[QuestionRecord], req: &GenerateRequest) -> Vec
 
     filtered.shuffle(&mut rng);
     filtered.truncate(req.count.min(filtered.len()));
-    filtered
+    Ok(filtered)
+}
+
+fn question_shortages(
+    requirements: &[(&str, usize)],
+    available: impl Fn(&str) -> usize,
+) -> Vec<String> {
+    requirements
+        .iter()
+        .filter_map(|(qtype, required)| {
+            let count = available(qtype);
+            (count < *required).then(|| format!("{qtype} (need {required}, available {count})"))
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct FlowEdge {
+    to: usize,
+    reverse: usize,
+    remaining: usize,
+}
+
+fn add_flow_edge(graph: &mut [Vec<FlowEdge>], from: usize, to: usize, capacity: usize) {
+    let reverse = graph[to].len();
+    let forward = graph[from].len();
+    graph[from].push(FlowEdge {
+        to,
+        reverse,
+        remaining: capacity,
+    });
+    graph[to].push(FlowEdge {
+        to: from,
+        reverse: forward,
+        remaining: 0,
+    });
+}
+
+pub fn generate_custom_set(
+    pool: &[QuestionRecord],
+    counts: &CustomCounts,
+    seed: Option<u64>,
+) -> Result<Vec<QuestionRecord>, String> {
+    let requirements = counts.requirements();
+    let total = requirements
+        .iter()
+        .try_fold(0usize, |total, (_, count)| total.checked_add(*count))
+        .ok_or("Custom question total is too large")?;
+    if total == 0 {
+        return Err("Custom mode requires at least one question".to_string());
+    }
+
+    let mut chapters = Vec::new();
+    let mut chapter_indexes = HashMap::new();
+    let mut buckets = vec![Vec::<Vec<&QuestionRecord>>::new(); requirements.len()];
+    for q in pool {
+        let Some(key) = chapter_key(&q.reference) else {
+            continue;
+        };
+        let chapter = *chapter_indexes.entry(key.clone()).or_insert_with(|| {
+            chapters.push(key);
+            chapters.len() - 1
+        });
+        if let Some(qtype) = requirements
+            .iter()
+            .position(|(qtype, _)| q.qtype.eq_ignore_ascii_case(qtype))
+        {
+            buckets[qtype].resize_with(chapters.len(), Vec::new);
+            buckets[qtype][chapter].push(q);
+        }
+    }
+    let shortages = question_shortages(&requirements, |qtype| {
+        let index = requirements
+            .iter()
+            .position(|(name, _)| *name == qtype)
+            .unwrap();
+        buckets[index].iter().map(Vec::len).sum()
+    });
+    if !shortages.is_empty() {
+        return Err(format!(
+            "Cannot generate a custom {total}-question set from the selected books/chapters. \
+             Insufficient question types: {}. Select more chapters, a different pool, \
+             or reduce the requested counts.",
+            shortages.join("; ")
+        ));
+    }
+
+    let max_appearances = usize::max(2, total.div_ceil(chapters.len().max(1)));
+    let mut rng = match seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
+    };
+    let source = 0;
+    let chapter_start = 1 + requirements.len();
+    let sink = chapter_start + chapters.len();
+    let mut graph = vec![Vec::new(); sink + 1];
+    let mut bucket_edges = Vec::new();
+    let mut chapter_order: Vec<usize> = (0..chapters.len()).collect();
+    chapter_order.shuffle(&mut rng);
+    for (index, (_, count)) in requirements.iter().enumerate() {
+        add_flow_edge(&mut graph, source, index + 1, *count);
+        for &chapter in &chapter_order {
+            let capacity = buckets[index].get(chapter).map_or(0, Vec::len);
+            if capacity > 0 && *count > 0 {
+                bucket_edges.push((index, chapter, graph[index + 1].len()));
+                add_flow_edge(&mut graph, index + 1, chapter_start + chapter, capacity);
+            }
+        }
+    }
+    for chapter in 0..chapters.len() {
+        add_flow_edge(&mut graph, chapter_start + chapter, sink, max_appearances);
+    }
+
+    // Residual paths can move earlier allocations so a feasible distribution is not
+    // rejected just because a randomly chosen chapter filled up first.
+    let mut selected = 0;
+    while selected < total {
+        let mut parents = vec![None; graph.len()];
+        let mut queue = VecDeque::from([source]);
+        parents[source] = Some((source, 0));
+        while let Some(node) = queue.pop_front() {
+            if node == sink {
+                break;
+            }
+            for (edge_index, edge) in graph[node].iter().enumerate() {
+                if edge.remaining > 0 && parents[edge.to].is_none() {
+                    parents[edge.to] = Some((node, edge_index));
+                    queue.push_back(edge.to);
+                }
+            }
+        }
+        if parents[sink].is_none() {
+            return Err(format!(
+                "Cannot generate a custom {total}-question set from the selected books/chapters. \
+                 The requested type counts cannot be met while respecting the limit of \
+                 {max_appearances} questions per chapter. Select more chapters, a different pool, \
+                 or change the requested counts."
+            ));
+        }
+        let mut amount = total - selected;
+        let mut node = sink;
+        while node != source {
+            let (from, edge) = parents[node].unwrap();
+            amount = amount.min(graph[from][edge].remaining);
+            node = from;
+        }
+        node = sink;
+        while node != source {
+            let (from, edge) = parents[node].unwrap();
+            let reverse = graph[from][edge].reverse;
+            graph[from][edge].remaining -= amount;
+            graph[node][reverse].remaining += amount;
+            node = from;
+        }
+        selected += amount;
+    }
+
+    let mut set = Vec::with_capacity(total);
+    for (qtype, chapter, edge) in bucket_edges {
+        let questions = &mut buckets[qtype][chapter];
+        let count = questions.len() - graph[qtype + 1][edge].remaining;
+        questions.shuffle(&mut rng);
+        set.extend(questions.iter().take(count).map(|q| (*q).clone()));
+    }
+    set.shuffle(&mut rng);
+    Ok(set)
 }
 
 pub fn generate_standard_set(
     pool: &[QuestionRecord],
     situation: bool,
     seed: Option<u64>,
-) -> Vec<QuestionRecord> {
+) -> Result<Vec<QuestionRecord>, String> {
     let mut rng: StdRng = match seed {
         Some(v) => SeedableRng::seed_from_u64(v),
         None => SeedableRng::from_entropy(),
@@ -402,6 +622,31 @@ pub fn generate_standard_set(
             .push(*pair);
     }
 
+    let first_type = if situation {
+        "Situation"
+    } else {
+        "In-What-Book-and-Chapter"
+    };
+    let requirements = [
+        (first_type, 1),
+        ("Quote", 1),
+        ("Reference", 1),
+        ("Verse", 1),
+        ("Context", 1),
+        ("According-To", 4),
+        ("General", 11),
+    ];
+    let shortages = question_shortages(&requirements, |qtype| {
+        by_type.get(&qtype.to_ascii_lowercase()).map_or(0, Vec::len)
+    });
+    if !shortages.is_empty() {
+        return Err(format!(
+            "Cannot generate a standard 20-question set from the selected books/chapters. \
+             Insufficient question types: {}. Select more chapters or a different pool.",
+            shortages.join("; ")
+        ));
+    }
+
     let chapter_keys: HashSet<String> = source
         .iter()
         .filter_map(|(_, q)| chapter_key(&q.reference))
@@ -409,6 +654,13 @@ pub fn generate_standard_set(
 
     let chapter_count = chapter_keys.len().max(1);
     let max_appearances = usize::max(2, 20_usize.div_ceil(chapter_count));
+    let chapter_limit_error = |qtype: &str| {
+        format!(
+            "Cannot generate a standard 20-question set from the selected books/chapters. \
+             Could not select enough {qtype} questions while respecting the limit of \
+             {max_appearances} questions per chapter. Select more chapters or a different pool."
+        )
+    };
 
     let mut chapter_usage: HashMap<String, usize> =
         chapter_keys.iter().map(|k| (k.clone(), 0usize)).collect();
@@ -463,11 +715,6 @@ pub fn generate_standard_set(
         Some((idx, question.clone()))
     };
 
-    let first_type = if situation {
-        "Situation"
-    } else {
-        "In-What-Book-and-Chapter"
-    };
     if let Some(q) = pick(
         first_type,
         true,
@@ -479,7 +726,7 @@ pub fn generate_standard_set(
     ) {
         set.push(q);
     } else {
-        return Vec::new();
+        return Err(chapter_limit_error(first_type));
     }
 
     for t in ["Quote", "Reference", "Verse", "Context"] {
@@ -494,7 +741,7 @@ pub fn generate_standard_set(
         ) {
             set.push(q);
         } else {
-            return Vec::new();
+            return Err(chapter_limit_error(t));
         }
     }
 
@@ -510,7 +757,7 @@ pub fn generate_standard_set(
         ) {
             set.push(q);
         } else {
-            return Vec::new();
+            return Err(chapter_limit_error("According-To"));
         }
     }
 
@@ -526,7 +773,7 @@ pub fn generate_standard_set(
         ) {
             set.push(q);
         } else {
-            return Vec::new();
+            return Err(chapter_limit_error("General"));
         }
     }
 
@@ -582,5 +829,5 @@ pub fn generate_standard_set(
     }
 
     set.shuffle(&mut rng);
-    set.into_iter().map(|(_, q)| q).collect()
+    Ok(set.into_iter().map(|(_, q)| q).collect())
 }

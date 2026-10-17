@@ -697,6 +697,297 @@ async fn owners_can_replace_a_pool_and_generation_sees_the_new_questions(pool: P
 }
 
 #[sqlx::test]
+async fn standard_generation_reports_filtered_shortages_without_returning_sets(pool: PgPool) {
+    let app = app(&pool);
+    let pool_id = create_pool(&pool, "public-pool", public_tier(&pool).await).await;
+    let mut rows = vec!["Question,Type,Reference,Answer".to_string()];
+    for chapter in 1..=8 {
+        for (qtype, count) in [
+            ("Situation", 1),
+            ("In-What-Book-and-Chapter", 1),
+            ("Quote", 1),
+            ("Reference", 1),
+            ("Verse", 1),
+            ("Context", 1),
+            ("According-To", 2),
+            ("General", 3),
+        ] {
+            if chapter >= 4 && ["Quote", "Reference", "Verse"].contains(&qtype) {
+                continue;
+            }
+            for index in 0..count {
+                rows.push(format!(
+                    "Question {chapter} {qtype} {index},{qtype},Luke {chapter}:1,Answer"
+                ));
+            }
+        }
+    }
+    sqlx::query("UPDATE question_pools SET csv_text = $1, updated_at = NOW() WHERE id = $2")
+        .bind(rows.join("\n"))
+        .bind(pool_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for situation in [true, false] {
+        let (status, body) = send(
+            &app,
+            generate_request(
+                pool_id,
+                json!({
+                    "question_type": "standard",
+                    "count": 20,
+                    "situation": situation,
+                    "sets": 3,
+                    "books": [{"name": "Luke", "start_chapter": 4, "end_chapter": 8}],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = body["error"].as_str().unwrap();
+        for qtype in ["Quote", "Reference", "Verse"] {
+            assert!(
+                error.contains(&format!("{qtype} (need 1, available 0)")),
+                "{error}"
+            );
+        }
+        assert!(body.get("sets").is_none());
+    }
+    let generated: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE action = 'questions.generated'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(generated, 0);
+
+    let (status, body) = send(
+        &app,
+        generate_request(
+            pool_id,
+            json!({"question_type": "standard", "count": 20, "seed": 7}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["sets"][0].as_array().unwrap().len(), 20);
+}
+
+#[sqlx::test]
+async fn custom_generation_returns_exact_reproducible_sets_and_reports_errors(pool: PgPool) {
+    let app = app(&pool);
+    let pool_id = create_pool(&pool, "public-pool", public_tier(&pool).await).await;
+    let options = json!({
+        "question_type": "custom",
+        "custom_counts": {"General": 2},
+        "sets": 3,
+        "seed": 42,
+        "books": [{"name": "John", "start_chapter": 1, "end_chapter": 1}],
+    });
+    let (status, first) = send(&app, generate_request(pool_id, options.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["sets"].as_array().unwrap().len(), 3);
+    for set in first["sets"].as_array().unwrap() {
+        assert_eq!(set.as_array().unwrap().len(), 2);
+        assert!(set
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["type"] == "General"));
+        assert_ne!(set[0]["question"], set[1]["question"]);
+    }
+    let (_, again) = send(&app, generate_request(pool_id, options)).await;
+    assert_eq!(first["sets"], again["sets"]);
+    let (_, shifted) = send(
+        &app,
+        generate_request(
+            pool_id,
+            json!({
+                "question_type": "custom", "custom_counts": {"General": 2}, "seed": 43,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(first["sets"][1], shifted["sets"][0]);
+
+    for (options, expected) in [
+        (json!({"question_type": "custom"}), "requires custom_counts"),
+        (
+            json!({"question_type": "custom", "custom_counts": {}}),
+            "at least one question",
+        ),
+        (
+            json!({"question_type": "custom", "custom_counts": {"Quote": 1, "General": 4}}),
+            "Quote (need 1, available 0)",
+        ),
+        (
+            json!({"question_type": "standard", "custom_counts": {"General": 2}}),
+            "only supported in Custom mode",
+        ),
+    ] {
+        let (status, body) = send(&app, generate_request(pool_id, options)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains(expected), "{body}");
+        assert!(body.get("sets").is_none());
+    }
+    for counts in [
+        json!({"General": -1}),
+        json!({"General": 0.5}),
+        json!({"Unknown": 1}),
+    ] {
+        let (status, _) = send(
+            &app,
+            generate_request(
+                pool_id,
+                json!({
+                    "question_type": "custom", "custom_counts": counts,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+#[sqlx::test]
+async fn custom_validation_reports_availability_and_feasibility_without_generating(pool: PgPool) {
+    let app = app(&pool);
+    let pool_id = create_pool(&pool, "public-pool", public_tier(&pool).await).await;
+    let csv = "Question,Type,Reference,Answer\n\
+        S1,Situation,John 1:1,A\nS2,Situation,John 1:2,A\nS3,Situation,John 1:3,A\n\
+        G1,General,John 2:1,A\nG2,General,John 2:2,A\nG3,General,John 2:3,A\n";
+    sqlx::query("UPDATE question_pools SET csv_text = $1, updated_at = NOW() WHERE id = $2")
+        .bind(csv)
+        .bind(pool_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (counts, end, valid, error) in [
+        (json!({}), 2, false, "at least one question"),
+        (
+            json!({"Situation": 4}),
+            2,
+            false,
+            "Situation (need 4, available 3)",
+        ),
+        (
+            json!({"Situation": 3, "General": 1}),
+            2,
+            false,
+            "limit of 2",
+        ),
+        (json!({"Situation": 2, "General": 2}), 2, true, ""),
+        (json!({"Situation": 3}), 1, true, ""),
+        (
+            json!({"General": 1}),
+            1,
+            false,
+            "General (need 1, available 0)",
+        ),
+    ] {
+        let (status, body) = send(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/generate/validate",
+                None,
+                json!({
+                    "pool_id": pool_id, "question_type": "custom", "count": 0,
+                    "custom_counts": counts,
+                    "books": [{"name": "John", "start_chapter": 1, "end_chapter": end}],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["valid"], valid);
+        assert_eq!(body["available"]["Situation"], 3);
+        assert_eq!(body["available"]["General"], if end == 1 { 0 } else { 3 });
+        assert_eq!(body["available"]["Quote"], 0);
+        assert_eq!(body["available"].as_object().unwrap().len(), 8);
+        assert!(body.get("sets").is_none());
+        if valid {
+            assert!(body["error"].is_null());
+        } else {
+            assert!(body["error"].as_str().unwrap().contains(error), "{body}");
+        }
+    }
+    let generated: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE action = 'questions.generated'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(generated, 0);
+
+    let restricted = create_pool(&pool, "restricted", create_tier(&pool, "higher", 1).await).await;
+    let (status, _) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/generate/validate",
+            None,
+            json!({
+                "pool_id": restricted, "question_type": "custom", "count": 1,
+                "custom_counts": {"General": 1},
+                "books": [{"name": "John", "start_chapter": 1, "end_chapter": 2}],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn custom_generation_scales_the_chapter_cap_after_filtering(pool: PgPool) {
+    let app = app(&pool);
+    let pool_id = create_pool(&pool, "public-pool", public_tier(&pool).await).await;
+    let csv = "Question,Type,Reference,Answer\n\
+        S1,Situation,John 1:1,A\nS2,Situation,John 1:2,A\nS3,Situation,John 1:3,A\n\
+        G1,General,John 2:1,A\nG2,General,John 2:2,A\nG3,General,John 2:3,A\n";
+    sqlx::query("UPDATE question_pools SET csv_text = $1, updated_at = NOW() WHERE id = $2")
+        .bind(csv)
+        .bind(pool_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(
+        &app,
+        generate_request(
+            pool_id,
+            json!({
+                "question_type": "custom",
+                "custom_counts": {"Situation": 3, "General": 1},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("limit of 2 questions per chapter"));
+    assert!(body.get("sets").is_none());
+
+    let (status, body) = send(
+        &app,
+        generate_request(
+            pool_id,
+            json!({
+                "question_type": "custom",
+                "custom_counts": {"Situation": 3},
+                "books": [{"name": "John", "start_chapter": 1, "end_chapter": 1}],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["sets"][0].as_array().unwrap().len(), 3);
+    assert!(body["sets"][0].as_array().unwrap().iter().all(
+        |q| q["type"] == "Situation" && q["reference"].as_str().unwrap().starts_with("John 1:")
+    ));
+}
+
+#[sqlx::test]
 async fn generate_returns_several_reproducible_sets_in_one_request(pool: PgPool) {
     let app = app(&pool);
     let pool_id = create_pool(&pool, "public-pool", public_tier(&pool).await).await;

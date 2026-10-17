@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use qsets_server::services::generator::{
-    filter_by_books, filter_by_books_cow, generate_questions, list_books, parse_csv, validate_csv,
-    BookFilter, GenerateRequest,
+    filter_by_books, filter_by_books_cow, generate_custom_set, generate_questions, list_books,
+    parse_csv, validate_csv, BookFilter, CustomCounts, GenerateRequest,
 };
 
 // ── Fixture helpers ──────────────────────────────────────────────────
@@ -318,7 +318,7 @@ fn standard_set_with_situation() {
         situation: Some(true),
         seed: Some(42),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
     assert_eq!(set.len(), 20);
 
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -343,7 +343,7 @@ fn standard_set_with_iwbac() {
         situation: Some(false),
         seed: Some(42),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
     assert_eq!(set.len(), 20);
 
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -363,7 +363,7 @@ fn standard_set_no_duplicate_questions() {
         situation: Some(true),
         seed: Some(777),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
     let questions: HashSet<&str> = set.iter().map(|q| q.question.as_str()).collect();
     assert_eq!(
         questions.len(),
@@ -381,7 +381,7 @@ fn standard_set_chapter_spread() {
         situation: Some(true),
         seed: Some(123),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
 
     // With 8 chapters and 20 questions, max per chapter = ceil(20/8) = 3
     let mut ch_counts: HashMap<String, usize> = HashMap::new();
@@ -409,7 +409,8 @@ fn different_seeds_produce_different_sets() {
             situation: Some(true),
             seed: Some(1),
         },
-    );
+    )
+    .unwrap();
     let b = generate_questions(
         &pool,
         &GenerateRequest {
@@ -418,7 +419,8 @@ fn different_seeds_produce_different_sets() {
             situation: Some(true),
             seed: Some(2),
         },
-    );
+    )
+    .unwrap();
     assert_ne!(a, b, "Different seeds should produce different sets");
 }
 
@@ -431,7 +433,7 @@ fn generate_non_standard_type_filter() {
         situation: None,
         seed: Some(10),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
     assert_eq!(set.len(), 5);
     assert!(set.iter().all(|q| q.qtype == "General"));
 }
@@ -445,7 +447,7 @@ fn generate_all_type_returns_mixed() {
         situation: None,
         seed: Some(10),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
     assert_eq!(set.len(), 30);
     let types: HashSet<&str> = set.iter().map(|q| q.qtype.as_str()).collect();
     assert!(types.len() > 1, "Expected multiple types in 'all' mode");
@@ -461,12 +463,12 @@ fn generate_count_capped_to_available() {
         situation: None,
         seed: Some(1),
     };
-    let set = generate_questions(&pool, &req);
+    let set = generate_questions(&pool, &req).unwrap();
     assert_eq!(set.len(), 2);
 }
 
 #[test]
-fn generate_empty_pool_returns_empty() {
+fn generate_empty_standard_pool_reports_missing_types() {
     let pool = parse_csv("Question,Type,Reference,Answer\n");
     let req = GenerateRequest {
         question_type: "standard".to_string(),
@@ -474,11 +476,299 @@ fn generate_empty_pool_returns_empty() {
         situation: Some(true),
         seed: Some(1),
     };
-    let set = generate_questions(&pool, &req);
-    assert!(set.is_empty());
+    let error = generate_questions(&pool, &req).unwrap_err();
+    assert!(error.contains("Situation (need 1, available 0)"));
+    assert!(error.contains("According-To (need 4, available 0)"));
+    assert!(error.contains("General (need 11, available 0)"));
+}
+
+#[test]
+fn standard_set_reports_all_shortages_in_selected_chapters() {
+    let mut pool = parse_csv(&full_fixture_csv());
+    pool.retain(|q| {
+        !q.reference.starts_with("John 4:")
+            || !["Quote", "Reference", "Verse"].contains(&q.qtype.as_str())
+    });
+    let filtered = filter_by_books(
+        &pool,
+        &[BookFilter {
+            name: "John".to_string(),
+            start_chapter: 4,
+            end_chapter: 4,
+        }],
+    );
+    for situation in [true, false] {
+        let error = generate_questions(
+            &filtered,
+            &GenerateRequest {
+                question_type: "standard".to_string(),
+                count: 20,
+                situation: Some(situation),
+                seed: Some(42),
+            },
+        )
+        .unwrap_err();
+        for shortage in [
+            "Quote (need 1, available 0)",
+            "Reference (need 1, available 0)",
+            "Verse (need 1, available 0)",
+            "According-To (need 4, available 2)",
+            "General (need 11, available 3)",
+        ] {
+            assert!(error.contains(shortage), "{error}");
+        }
+        assert!(!error.contains("Context ("));
+        assert!(!error.contains("Situation ("));
+        assert!(!error.contains("In-What-Book-and-Chapter ("));
+    }
+}
+
+#[test]
+fn standard_set_reports_the_selected_opening_type() {
+    let mut pool = parse_csv(&full_fixture_csv());
+    pool.retain(|q| q.qtype != "Situation");
+    let mut req = GenerateRequest {
+        question_type: "standard".to_string(),
+        count: 20,
+        situation: Some(true),
+        seed: Some(42),
+    };
+    assert!(generate_questions(&pool, &req)
+        .unwrap_err()
+        .contains("Situation (need 1, available 0)"));
+    req.situation = Some(false);
+    assert_eq!(generate_questions(&pool, &req).unwrap().len(), 20);
+
+    pool.retain(|q| q.qtype != "In-What-Book-and-Chapter");
+    assert!(generate_questions(&pool, &req)
+        .unwrap_err()
+        .contains("In-What-Book-and-Chapter (need 1, available 0)"));
+}
+
+#[test]
+fn standard_set_reports_chapter_limit_when_type_totals_are_sufficient() {
+    let mut pool = parse_csv(&full_fixture_csv());
+    for q in &mut pool {
+        if q.qtype == "General" {
+            q.reference = "John 1:1".to_string();
+        }
+    }
+    let error = generate_questions(
+        &pool,
+        &GenerateRequest {
+            question_type: "standard".to_string(),
+            count: 20,
+            situation: Some(true),
+            seed: Some(42),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("enough General questions"), "{error}");
+    assert!(
+        error.contains("limit of 3 questions per chapter"),
+        "{error}"
+    );
 }
 
 // ── Multi-book generation ────────────────────────────────────────────
+
+#[test]
+fn custom_sets_have_exact_counts_no_duplicates_and_scaled_chapter_cap() {
+    let pool = parse_csv(&full_fixture_csv());
+    let counts = CustomCounts {
+        situation: 1,
+        in_what_book_and_chapter: 1,
+        quote: 2,
+        reference: 2,
+        verse: 2,
+        context: 2,
+        according_to: 4,
+        general: 11,
+    };
+    for seed in 0..100 {
+        let set = generate_custom_set(&pool, &counts, Some(seed)).unwrap();
+        assert_eq!(set.len(), 25);
+        assert_eq!(
+            set.iter()
+                .map(|q| &q.question)
+                .collect::<HashSet<_>>()
+                .len(),
+            25
+        );
+        let mut types = HashMap::new();
+        let mut chapters = HashMap::new();
+        for q in &set {
+            *types.entry(q.qtype.as_str()).or_insert(0) += 1;
+            *chapters
+                .entry(q.reference.split(':').next().unwrap())
+                .or_insert(0) += 1;
+        }
+        for (qtype, count) in [
+            ("Situation", 1),
+            ("In-What-Book-and-Chapter", 1),
+            ("Quote", 2),
+            ("Reference", 2),
+            ("Verse", 2),
+            ("Context", 2),
+            ("According-To", 4),
+            ("General", 11),
+        ] {
+            assert_eq!(types[qtype], count);
+        }
+        assert!(chapters.values().all(|count| *count <= 4));
+        assert_eq!(
+            set,
+            generate_custom_set(&pool, &counts, Some(seed)).unwrap()
+        );
+    }
+    assert_ne!(
+        generate_custom_set(&pool, &counts, Some(1)).unwrap(),
+        generate_custom_set(&pool, &counts, Some(2)).unwrap()
+    );
+}
+
+#[test]
+fn custom_sets_allow_small_totals_and_omit_unrequested_types() {
+    let pool = parse_csv(&full_fixture_csv());
+    for count in [1, 5, 16] {
+        let set = generate_custom_set(
+            &pool,
+            &CustomCounts {
+                general: count,
+                ..Default::default()
+            },
+            Some(42),
+        )
+        .unwrap();
+        assert_eq!(set.len(), count);
+        assert!(set.iter().all(|q| q.qtype == "General"));
+    }
+}
+
+#[test]
+fn custom_sets_reallocate_chapters_instead_of_failing_a_feasible_distribution() {
+    let pool = parse_csv(
+        "Question,Type,Reference,Answer\n\
+         S1,Situation,John 1:1,A\nS2,Situation,John 1:2,A\n\
+         S3,Situation,John 2:1,A\nS4,Situation,John 2:2,A\n\
+         Q1,Quote,John 1:3,A\nQ2,Quote,John 1:4,A\n\
+         G1,General,John 3:1,A\nG2,General,John 3:2,A\n",
+    );
+    let counts = CustomCounts {
+        situation: 2,
+        quote: 2,
+        general: 2,
+        ..Default::default()
+    };
+    for seed in 0..100 {
+        let set = generate_custom_set(&pool, &counts, Some(seed)).unwrap();
+        assert_eq!(set.len(), 6);
+        assert!(set
+            .iter()
+            .filter(|q| q.qtype == "Situation")
+            .all(|q| q.reference.starts_with("John 2:")));
+    }
+}
+
+#[test]
+fn custom_sets_report_shortages_and_impossible_chapter_distribution() {
+    let pool = parse_csv(&full_fixture_csv());
+    let error = generate_custom_set(
+        &pool,
+        &CustomCounts {
+            quote: 9,
+            general: 25,
+            ..Default::default()
+        },
+        Some(42),
+    )
+    .unwrap_err();
+    assert!(error.contains("Quote (need 9, available 8)"));
+    assert!(error.contains("General (need 25, available 24)"));
+
+    let mut concentrated = pool.clone();
+    for q in &mut concentrated {
+        if q.qtype == "General" {
+            q.reference = "John 1:1".to_string();
+        }
+    }
+    let error = generate_custom_set(
+        &concentrated,
+        &CustomCounts {
+            general: 3,
+            ..Default::default()
+        },
+        Some(42),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("limit of 2 questions per chapter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn custom_counts_reject_zero_overflow_and_invalid_input() {
+    assert!(generate_custom_set(&[], &CustomCounts::default(), None)
+        .unwrap_err()
+        .contains("at least one"));
+    assert!(generate_custom_set(
+        &[],
+        &CustomCounts {
+            general: usize::MAX,
+            quote: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap_err()
+    .contains("too large"));
+    for invalid in [
+        r#"{"General": -1}"#,
+        r#"{"General": 1.5}"#,
+        r#"{"Unknown": 1}"#,
+    ] {
+        assert!(serde_json::from_str::<CustomCounts>(invalid).is_err());
+    }
+}
+
+#[test]
+fn custom_sets_respect_book_and_chapter_filters() {
+    let pool = parse_csv(&multi_book_csv());
+    let filtered = filter_by_books(
+        &pool,
+        &[BookFilter {
+            name: "Acts".to_string(),
+            start_chapter: 4,
+            end_chapter: 8,
+        }],
+    );
+    let set = generate_custom_set(
+        &filtered,
+        &CustomCounts {
+            general: 5,
+            according_to: 3,
+            ..Default::default()
+        },
+        Some(42),
+    )
+    .unwrap();
+    assert_eq!(set.len(), 8);
+    for q in &set {
+        assert!(q.reference.starts_with("Acts "));
+        let chapter: usize = q
+            .reference
+            .split(' ')
+            .nth(1)
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((4..=8).contains(&chapter));
+    }
+}
 
 #[test]
 fn standard_set_from_filtered_multi_book_pool() {
@@ -495,7 +785,7 @@ fn standard_set_from_filtered_multi_book_pool() {
         situation: Some(true),
         seed: Some(55),
     };
-    let set = generate_questions(&filtered, &req);
+    let set = generate_questions(&filtered, &req).unwrap();
     assert_eq!(set.len(), 20);
     assert!(set.iter().all(|q| q.reference.starts_with("Luke")));
 }
@@ -512,7 +802,7 @@ fn hundred_seeds_all_produce_valid_20_question_sets() {
             situation: Some(seed % 2 == 0),
             seed: Some(seed),
         };
-        let set = generate_questions(&pool, &req);
+        let set = generate_questions(&pool, &req).unwrap();
         assert_eq!(
             set.len(),
             20,

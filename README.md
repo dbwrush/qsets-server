@@ -42,6 +42,36 @@ Rust/Axum + Askama web server for Nazarene Bible quizzing question pools with ti
   - Remaining as General
   - Chapter usage cap and replacement rounds with final reshuffle
 - `all` or specific type name: random sample mode
+- `custom`: choose a nonnegative whole-number count for each of the eight question
+  types in step 3. Zero excludes a type; the total can be any positive number.
+  Each set has exactly the requested distribution, without repeating a pool entry.
+  The chapter cap is `max(2, ceil(total / chapter_count))`, where `chapter_count`
+  counts all distinct chapters available in the filtered pool, as in standard mode.
+  Missing questions or an impossible chapter distribution produce an error rather
+  than a shortened or relaxed set. Seeds, multiple sets, and exports work as usual.
+  Situation Questions remains the default mode on page load and Start over.
+  Custom controls show requested versus available counts for the selected passages,
+  highlight shortages, and disable Generate sets until the server confirms the
+  counts and chapter distribution are feasible. Generation failures appear in a
+  dismissible pop-up.
+
+Standard generation never relaxes these rules. If the selected books/chapters lack
+enough questions of a required type, generation reports the required and available
+counts instead of returning an empty set. Failures caused by the chapter usage cap
+also report the affected type and limit. The API returns HTTP 400 with an `error`
+message, which the generator form displays in a pop-up; multi-set requests fail as a whole.
+
+For Custom API requests, send `"question_type": "custom"` and a `custom_counts`
+object using the CSV type names as keys, for example
+`{"Situation": 1, "According-To": 4, "General": 5}`. Omitted types default to zero;
+unknown keys, negative counts, and fractional counts are rejected. The total is
+derived from `custom_counts`, not the legacy `count` field. Other modes must omit
+`custom_counts`.
+
+`POST /api/generate/validate` accepts the same Custom request fields, requires a
+nonempty `books` selection, and returns `valid`, `error` (null when valid), and
+`available` counts for all eight types. It checks the same chapter constraints
+without recording a generation event or returning question sets.
 
 ## Environment
 

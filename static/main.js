@@ -24,6 +24,11 @@ let generatedSets = [];
 let generatedRoundNames = [];
 let lastSelectedBookFilters = [];
 let generatedPool = null;
+let customValid = false;
+let customAvailable = null;
+let validationVersion = 0;
+let validationTimer;
+let generating = false;
 
 // One-letter question type codes; shared by the on-screen sets and the RTF export.
 const TYPE_ABBREV = { "According-To": "A", General: "G", "In-What-Book-and-Chapter": "I", Quote: "Q", Reference: "R", Situation: "S", Context: "X", Verse: "V" };
@@ -51,23 +56,43 @@ function showStep(id) {
 }
 
 // Init
-document.addEventListener("DOMContentLoaded", async () => {
+async function initializeGenerator() {
   document.getElementById("printSets")?.addEventListener("click", () => window.print());
   document.getElementById("downloadRTF")?.addEventListener("click", downloadRTF);
   document.getElementById("downloadJSON")?.addEventListener("click", downloadJSON);
   document.getElementById("showAnswers")?.addEventListener("change", toggleAnswers);
 
   document.getElementById("backToStep1")?.addEventListener("click", () => showStep("step-1"));
-  document.getElementById("nextToStep3")?.addEventListener("click", () => showStep("step-3"));
+  document.getElementById("nextToStep3")?.addEventListener("click", () => {
+    showStep("step-3");
+    syncCustomMode();
+  });
   document.getElementById("backToStep2")?.addEventListener("click", () => showStep("step-2"));
   document.getElementById("backToStep3")?.addEventListener("click", () => showStep("step-3"));
   document.getElementById("startOver")?.addEventListener("click", () => {
     window.scrollTo({ top: 0 });
+    document.querySelector('input[name="questionType"][value="situation"]').checked = true;
+    syncCustomMode();
     showStep("step-1");
   });
 
+  document.querySelector('input[name="questionType"][value="situation"]').checked = true;
+  document.getElementById("customCounts").addEventListener("input", updateCustomTotal);
+  document.getElementById("bookSelection").addEventListener("input", invalidateCustomSelection);
+  document.getElementById("bookSelection").addEventListener("change", invalidateCustomSelection);
+  document.querySelectorAll('input[name="questionType"]').forEach(input => {
+    input.addEventListener("change", syncCustomMode);
+  });
+  syncCustomMode();
+
   await loadPools();
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initializeGenerator);
+} else {
+  void initializeGenerator();
+}
 
 // ── Pool Selection (table) ──
 async function loadPools() {
@@ -104,6 +129,10 @@ function selectPool(row) {
   document.querySelectorAll("#pool-section tr").forEach(r => r.classList.remove("row-selected"));
   row.classList.add("row-selected");
   selectedPoolId = parseInt(row.dataset.poolId);
+  customAvailable = null;
+  customValid = false;
+  validationVersion++;
+  updateGenerateButton();
   void loadPoolBooks(selectedPoolId);
 }
 
@@ -179,28 +208,138 @@ function selectedBookFilters() {
 }
 
 // ── Generation ──
+function syncCustomMode() {
+  const custom = document.querySelector('input[name="questionType"]:checked')?.value === "custom";
+  const options = document.getElementById("customOptions");
+  options.hidden = !custom;
+  options.disabled = !custom;
+  document.getElementById("generateStatus").textContent = "";
+  if (custom) updateCustomTotal();
+  else {
+    validationVersion++;
+    clearTimeout(validationTimer);
+    updateGenerateButton();
+  }
+}
+
+function updateGenerateButton() {
+  const custom = document.querySelector('input[name="questionType"]:checked')?.value === "custom";
+  document.getElementById("generateBtn").disabled = generating || (custom && !customValid);
+}
+
+function showGenerationError(message) {
+  document.getElementById("generationErrorMessage").textContent = message;
+  const dialog = document.getElementById("generationError");
+  if (!dialog.open) dialog.showModal();
+}
+
+function invalidateCustomSelection() {
+  customAvailable = null;
+  customValid = false;
+  validationVersion++;
+  updateCustomTotal();
+}
+
+function renderCustomAvailability() {
+  document.querySelectorAll("#customCounts input").forEach(input => {
+    const requested = Number(input.value);
+    const available = customAvailable?.[input.dataset.questionType];
+    const invalid = input.value === "" || !Number.isSafeInteger(requested) || requested < 0;
+    const tooMany = available !== undefined && requested > available;
+    const warning = document.getElementById(input.getAttribute("aria-describedby"));
+    input.setAttribute("aria-invalid", String(invalid || tooMany));
+    warning.classList.toggle("over-limit", invalid || tooMany);
+    warning.textContent = invalid ? "Enter a whole number of 0 or more."
+      : `${requested} requested / ${available === undefined ? "checking availability" : `${available} available`}${tooMany ? " - not enough questions" : ""}`;
+  });
+}
+
+function selectedCustomCounts() {
+  const counts = {};
+  let total = 0;
+  document.querySelectorAll("#customCounts input").forEach(input => {
+    const count = Number(input.value);
+    if (input.value === "" || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`${input.dataset.questionType.replace(/-/g, " ")} count must be a whole number of 0 or more.`);
+    }
+    counts[input.dataset.questionType] = count;
+    total += count;
+  });
+  if (!Number.isSafeInteger(total)) throw new Error("Custom question total is too large.");
+  return { counts, total };
+}
+
+function updateCustomTotal() {
+  const validation = document.getElementById("customValidation");
+  const version = ++validationVersion;
+  clearTimeout(validationTimer);
+  customValid = false;
+  updateGenerateButton();
+  renderCustomAvailability();
+  if (document.querySelector('input[name="questionType"]:checked')?.value !== "custom") return;
+  try {
+    const { counts, total } = selectedCustomCounts();
+    const books = selectedBookFilters();
+    if (!selectedPoolId || !books.length) throw new Error("Select at least one book.");
+    validation.textContent = "Checking counts and chapter limits...";
+    validationTimer = setTimeout(async () => {
+      try {
+        const data = await api("/api/generate/validate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            pool_id: selectedPoolId, question_type: "custom", count: total,
+            custom_counts: counts, books,
+          }),
+        });
+        if (version !== validationVersion) return;
+        customAvailable = data.available;
+        customValid = data.valid === true;
+        renderCustomAvailability();
+        validation.textContent = total === 0 ? "" : customValid ? "This configuration can be generated." : data.error;
+        updateGenerateButton();
+      } catch (err) {
+        if (version !== validationVersion) return;
+        validation.textContent = `Unable to check availability: ${err.message}`;
+        showGenerationError(validation.textContent);
+        updateGenerateButton();
+      }
+    }, 200);
+  } catch (err) {
+    validation.textContent = err.message;
+  }
+}
+
 document.getElementById("generateBtn")?.addEventListener("click", async () => {
-  if (!selectedPoolId) { alert("Select a pool first."); return; }
+  if (!selectedPoolId) { showGenerationError("Select a pool first."); return; }
 
   const books = selectedBookFilters();
-  lastSelectedBookFilters = books;
-  if (books.length === 0) { alert("Select at least one book."); return; }
+  if (books.length === 0) { showGenerationError("Select at least one book."); return; }
 
   const numSets = Math.min(MAX_SETS, Math.max(1, parseInt(document.getElementById("numSets").value) || 1));
-  const useSituation = document.querySelector('input[name="questionType"]:checked')?.value === "situation";
+  const mode = document.querySelector('input[name="questionType"]:checked')?.value;
   const seedInput = document.getElementById("seedInput").value;
   const seed = seedInput ? Number(seedInput) : null;
   if (seed !== null && !(Number.isSafeInteger(seed) && seed >= 0)) {
-    alert("Seed must be a whole number of 0 or more.");
+    showGenerationError("Seed must be a whole number of 0 or more.");
     return;
   }
 
-  const btn = document.getElementById("generateBtn");
   const status = document.getElementById("generateStatus");
-  btn.disabled = true;
+  generating = true;
+  updateGenerateButton();
   status.textContent = "Generating…";
 
   try {
+    let count = 20;
+    let customCounts;
+    if (mode === "custom") {
+      if (!customValid) throw new Error("Check the custom counts and chapter limits before generating.");
+      const custom = selectedCustomCounts();
+      if (custom.total === 0) throw new Error("Custom mode requires at least one question.");
+      customCounts = custom.counts;
+      count = custom.total;
+    }
     const prefix = document.getElementById("setNamePrefix")?.value || "SET #";
 
     // One request for every set; the server derives set i's seed as seed + i.
@@ -209,9 +348,10 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         pool_id: selectedPoolId,
-        question_type: "standard",
-        count: 20,
-        situation: useSituation,
+        question_type: mode === "custom" ? "custom" : "standard",
+        count,
+        situation: mode === "situation",
+        custom_counts: customCounts,
         seed,
         books,
         sets: numSets,
@@ -223,12 +363,15 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
 
     generatedSets = sets;
     generatedRoundNames = names;
+    lastSelectedBookFilters = books;
     displayResults(sets, prefix);
     status.textContent = "";
   } catch (err) {
-    status.textContent = `Error: ${err.message}`;
+    status.textContent = "";
+    showGenerationError(err.message);
   } finally {
-    btn.disabled = false;
+    generating = false;
+    updateGenerateButton();
   }
 });
 
@@ -364,4 +507,3 @@ function escapeHtml(text) {
   const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" };
   return String(text).replace(/[&<>"']/g, m => map[m]);
 }
-

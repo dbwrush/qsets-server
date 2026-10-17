@@ -665,6 +665,37 @@ input[type="radio"]:checked::after { transform: scale(1); }
 
 .options-grid .form-group { margin-bottom: 0; }
 
+#customOptions {
+  margin: 1.5rem 0 0;
+  padding: 1rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+}
+
+#customOptions p {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.custom-availability { color: var(--muted); }
+.custom-availability.over-limit { color: var(--danger); font-weight: 600; }
+#customCounts input[aria-invalid="true"] { border-color: var(--danger); }
+
+#generationError {
+  width: min(28rem, calc(100% - 2rem));
+  max-height: 80vh;
+  padding: 1.5rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+#generationError::backdrop { background: rgba(0, 0, 0, 0.4); }
+#generationError h2 { font-size: 1.25rem; }
+#generationError form { text-align: right; }
+
 /* ── Messages ── */
 .msg-info {
   color: var(--muted);
