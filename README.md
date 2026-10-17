@@ -80,9 +80,9 @@ types, and session length (0 means all matching questions). Questions are shuffl
 without repeating a pool entry; a request larger than the available pool uses all
 matching questions. Study does not use standard-set distributions or chapter caps.
 
-Each question has 20 seconds from display to complete and submit an answer.
+Each question has 30 seconds from display to complete and submit an answer.
 The clock continues while the tab is inactive. Expiry does not prevent submission:
-correctness and submitting within 20 seconds are tracked separately. Normalized
+correctness and submitting within 30 seconds are tracked separately. Normalized
 exact matches ignore case, punctuation, and extra whitespace. Parenthetical text
 is optional: `John (the man sent from God)` accepts either `John` or the full answer.
 Parenthesized alternatives separated by `OR` require at least one complete option;

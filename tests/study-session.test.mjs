@@ -52,10 +52,10 @@ test("parenthesized OR alternatives require at least one complete option", () =>
   assert.equal(answersMatch("John the Baptist", "John ((the Baptist) OR (the man sent from God))"), true);
 });
 
-test("submission timing has an exact 20-second boundary", () => {
-  assert.deepEqual(timing(100, 20_099), { elapsed: 19_999, onTime: true });
-  assert.deepEqual(timing(100, 20_100), { elapsed: 20_000, onTime: true });
-  assert.deepEqual(timing(100, 20_101), { elapsed: 20_001, onTime: false });
+test("submission timing has an exact 30-second boundary", () => {
+  assert.deepEqual(timing(100, 30_099), { elapsed: 29_999, onTime: true });
+  assert.deepEqual(timing(100, 30_100), { elapsed: 30_000, onTime: true });
+  assert.deepEqual(timing(100, 30_101), { elapsed: 30_001, onTime: false });
   assert.equal(timing(0, 120_000).onTime, false);
 });
 
