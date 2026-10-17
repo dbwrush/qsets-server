@@ -1,4 +1,4 @@
-import { QUESTION_MS, answersMatch, timing, summarize } from "./study-session.mjs";
+import { QUESTION_MS, answersMatch, timing, summarize } from "./study-session.mjs?v=optional-answers-1";
 
 const $ = id => document.getElementById(id);
 const TYPES = ["General", "According-To", "Situation", "In-What-Book-and-Chapter", "Quote", "Reference", "Verse", "Context"];

@@ -83,7 +83,10 @@ matching questions. Study does not use standard-set distributions or chapter cap
 Each question has 20 seconds from display to complete and submit an answer.
 The clock continues while the tab is inactive. Expiry does not prevent submission:
 correctness and submitting within 20 seconds are tracked separately. Normalized
-exact matches ignore case, punctuation, and extra whitespace. Other answers require
+exact matches ignore case, punctuation, and extra whitespace. Parenthetical text
+is optional: `John (the man sent from God)` accepts either `John` or the full answer.
+Parenthesized alternatives separated by `OR` require at least one complete option;
+combining options in either order is also accepted. Other answers require
 self-assessment against the expected answer. Revealing/skipping is not correct.
 The summary separates correct/on-time, correct/late, incorrect, skipped, and
 self-assessed correct answers; missed and late questions can be reviewed.
