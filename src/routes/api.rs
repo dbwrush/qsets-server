@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tiers", get(list_assignable_tiers))
         .route("/api/generate", post(generate))
         .route("/api/generate/validate", post(validate_custom_generation))
+        .route("/api/study/questions", post(study_questions))
         .route("/api/admin/tiers", get(list_tiers).post(create_tier))
         .route("/api/admin/tiers/:id", put(update_tier).delete(delete_tier))
         .route("/api/admin/users", get(list_users).post(create_user))
@@ -640,6 +641,63 @@ async fn pool_books(State(state): State<AppState>, actor: Actor, Path(id): Path<
 
 fn one_set() -> usize {
     1
+}
+
+#[derive(Deserialize)]
+struct StudyBody {
+    pool_id: i32,
+    books: Vec<generator::BookFilter>,
+    types: Vec<String>,
+    count: usize,
+}
+
+async fn study_questions(
+    State(state): State<AppState>,
+    actor: Actor,
+    Json(body): Json<StudyBody>,
+) -> ApiResult {
+    if body.books.is_empty() || body.types.is_empty() {
+        return Err(ApiError::bad_request(
+            "Select passages and at least one question type",
+        ));
+    }
+    let types = generator::available_type_counts(&[]);
+    if body.types.iter().any(|t| !types.contains_key(t.as_str())) {
+        return Err(ApiError::bad_request("Unknown study question type"));
+    }
+    let source = authorize_pool_access(&state, &actor, body.pool_id).await?;
+    let parsed = parsed_pool(&state, &source).await?;
+    let filtered = generator::filter_by_books_cow(&parsed, &body.books);
+    let questions: Vec<_> = filtered
+        .iter()
+        .filter(|q| body.types.iter().any(|t| t.eq_ignore_ascii_case(&q.qtype)))
+        .cloned()
+        .collect();
+    if questions.is_empty() {
+        return Err(ApiError::bad_request(
+            "No questions match the selected passages and types",
+        ));
+    }
+    let count = if body.count == 0 {
+        questions.len()
+    } else {
+        body.count
+    };
+    let selected = generator::generate_questions(
+        &questions,
+        &generator::GenerateRequest {
+            question_type: "all".to_string(),
+            count,
+            situation: None,
+            seed: None,
+        },
+    )
+    .map_err(ApiError::bad_request)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({"questions": selected})),
+    )
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]

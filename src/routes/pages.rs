@@ -54,6 +54,13 @@ struct IndexTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "study.html")]
+struct StudyTemplate<'a> {
+    csrf_token: &'a str,
+    header: Header,
+}
+
+#[derive(Template)]
 #[template(path = "login.html")]
 struct LoginTemplate<'a> {
     csrf_token: &'a str,
@@ -109,6 +116,7 @@ struct VerifyEmailTemplate<'a> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/study", get(study_page))
         .route("/login", get(login))
         .route("/register", get(register_page))
         .route("/forgot-password", get(forgot_password_page))
@@ -118,6 +126,18 @@ pub fn router(state: AppState) -> Router {
         .route("/admin", get(admin_page))
         .route("/pools", get(admin_page))
         .with_state(state)
+}
+
+async fn study_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let (jar, csrf) = security::ensure_csrf_cookie(jar);
+    let user = signed_in_user(&state, &jar).await;
+    render(
+        jar,
+        StudyTemplate {
+            csrf_token: &csrf,
+            header: Header::new(user.as_ref()),
+        },
+    )
 }
 
 async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {

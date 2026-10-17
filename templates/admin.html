@@ -48,6 +48,26 @@
           <button type="submit" class="btn-primary">Upload</button>
         </form>
         <div id="upload-status"></div>
+        <details class="csv-format-help">
+          <summary>How to format your CSV</summary>
+          <p>Export a UTF-8, comma-separated CSV with these headers and one question per row.
+            Header names are case-insensitive and columns may be in any order. All four fields must be filled in.</p>
+          <pre><code>Question,Type,Reference,Answer
+Example question text,General,John 1:1,Example answer</code></pre>
+          <ul>
+            <li><strong>Type:</strong> <code>General</code>, <code>According-To</code>,
+              <code>Situation</code>, <code>In-What-Book-and-Chapter</code>, <code>Quote</code>,
+              <code>Reference</code>, <code>Verse</code>, or <code>Context</code>.</li>
+            <li><strong>Reference:</strong> use a book name followed by a chapter, such as
+              <code>John 1:1</code> or <code>1 John 3:16</code>, so chapter filtering works.</li>
+            <li>Wrap fields containing commas, line breaks, or double quotes in double quotes.
+              Escape a double quote by doubling it: <code>"A comma, and a ""quote"""</code>.
+              Spreadsheet CSV export handles this for you.</li>
+          </ul>
+          <p>Uploads are limited to 10 MB including form data. Invalid or incomplete rows are skipped;
+            a file with no valid questions is rejected. A standard set also needs enough questions
+            of each required type in the selected chapters; smaller pools can use Custom mode.</p>
+        </details>
 
         <h3>{% if is_admin %}All pools{% else %}Your pools{% endif %}</h3>
         <p class="form-hint">Replacing a pool swaps in a new CSV and keeps its name and tier.</p>

@@ -5,15 +5,17 @@
         <span class="brand-name">QSets</span>
       </a>
       <nav class="site-nav" aria-label="Related tools">
-        <a href="https://qperf.dbwrush.com" class="nav-link">QPerformance</a>
+        <a href="/" class="nav-link">Generate</a>
+        <a href="/study" class="nav-link">Study</a>
+        <a href="https://qperf.dbwrush.com" class="nav-link related-tool">QPerformance</a>
         <!-- <a href="https://qschedule.dbwrush.com" class="nav-link">QSchedule</a> -->
-        <a href="https://www.quizstuff.com" class="nav-link">QuizStuff</a>
+        <a href="https://www.quizstuff.com" class="nav-link related-tool">QuizStuff</a>
       </nav>
       <div class="account-nav">
         {% if header.is_authenticated %}
         <div class="user-menu">
           <button type="button" class="user-menu-button" id="user-menu-button" aria-expanded="false" aria-controls="user-menu" aria-label="Account menu for {{ header.username }}">
-            <span class="user-avatar" aria-hidden="true">{{ header.initial }}</span>
+            <span class="user-avatar" aria-hidden="true"><span>{{ header.initial }}</span></span>
             <span class="user-name">{{ header.username }}</span>
             <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5"/></svg>
           </button>
