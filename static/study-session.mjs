@@ -1,4 +1,4 @@
-export const QUESTION_MS = 20_000;
+export const QUESTION_MS = 30_000;
 
 function normalizeText(answer) {
   return answer.normalize("NFKC").toLowerCase().replace(/\p{P}/gu, "").replace(/\s+/gu, " ");

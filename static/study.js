@@ -1,4 +1,4 @@
-import { QUESTION_MS, answersMatch, timing, summarize } from "./study-session.mjs?v=optional-answers-1";
+import { QUESTION_MS, answersMatch, timing, summarize } from "./study-session.mjs?v=study-30s-1";
 
 const $ = id => document.getElementById(id);
 const TYPES = ["General", "According-To", "Situation", "In-What-Book-and-Chapter", "Quote", "Reference", "Verse", "Context"];
@@ -209,7 +209,7 @@ function finish() {
   $("studyStats").replaceChildren();
   for (const [label, value] of [
     ["Correct", `${stats.correct} / ${stats.answered}`],
-    ["Correct in 20s", `${stats.onTime} / ${stats.answered}`],
+    [`Correct in ${QUESTION_MS / 1000}s`, `${stats.onTime} / ${stats.answered}`],
     ["Correct, late", stats.late], ["Incorrect", stats.incorrect],
     ["Skipped", stats.skipped], ["Self-marked correct", stats.selfCorrected],
   ]) {
