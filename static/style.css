@@ -50,6 +50,7 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+
 [hidden] { display: none !important; }
 
 body {
@@ -1428,3 +1429,12 @@ input[type="text"], input:not([type]), input[type="email"], input[type="password
   .question-item { break-inside: avoid; }
   .question-type { border-color: #000; color: #000; }
 }
+
+/* The installed app draws edge to edge (viewport-fit=cover), so the page's own background shows
+   behind Android's navigation buttons. Keep content clear of the system bars and display cutouts. */
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.site-header { padding-top: env(safe-area-inset-top); }
+.site-footer { padding-bottom: calc(1.5rem + env(safe-area-inset-bottom)); }
