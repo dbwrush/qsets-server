@@ -465,9 +465,23 @@ async function loadAudit(append = false) {
   }
 }
 
-function auditDetails(metadata) {
+function auditDetails(entry) {
+  const metadata = entry.metadata;
   if (!metadata || typeof metadata !== "object" || !Object.keys(metadata).length) return "";
-  return Object.entries(metadata).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ");
+  return Object.entries(metadata).map(([k, v]) => {
+    if (k === "tier_id" && entry.tier_name) return `tier: ${entry.tier_name}`;
+    return `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`;
+  }).join(", ");
+}
+
+const AUDIT_TARGET_LABELS = { user: "User", question_pool: "Pool", tier: "Tier" };
+
+// Names the thing an event acted on; the id is kept as a hover hint and for things now deleted.
+function auditTarget(e) {
+  const label = AUDIT_TARGET_LABELS[e.target_type] || e.target_type;
+  if (e.target_name) return `<span title="${escapeHtml(`${e.target_type} ${e.target_id ?? ""}`.trim())}">${escapeHtml(`${label}: ${e.target_name}`)}</span>`;
+  if (e.target_id) return escapeHtml(`${label} #${e.target_id} (deleted)`);
+  return escapeHtml(label);
 }
 
 function renderAudit(entries, container, append) {
@@ -475,9 +489,9 @@ function renderAudit(entries, container, append) {
       <td>${escapeHtml(new Date(e.created_at).toLocaleString())}</td>
       <td>${escapeHtml(e.actor_username ?? (e.actor_user_id != null ? `#${e.actor_user_id}` : "—"))}</td>
       <td>${escapeHtml(e.action)}</td>
-      <td>${escapeHtml(`${e.target_type}${e.target_id ? ` ${e.target_id}` : ""}`)}</td>
+      <td>${auditTarget(e)}</td>
       <td title="${escapeHtml(e.user_agent || "")}">${escapeHtml(e.ip_address || "")}</td>
-      <td>${escapeHtml(auditDetails(e.metadata))}</td>
+      <td>${escapeHtml(auditDetails(e))}</td>
     </tr>`).join("");
 
   const tbody = container.querySelector("tbody");

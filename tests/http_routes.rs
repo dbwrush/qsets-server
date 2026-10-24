@@ -2239,3 +2239,205 @@ async fn account_pages_render(pool: PgPool) {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&bytes).contains("alice@example.com"));
 }
+
+async fn set_session_dates(pool: &PgPool, token: &str, created_ago: &str, expires_in: &str) {
+    sqlx::query(
+        "UPDATE sessions SET created_at = NOW() - $2::interval, expires_at = NOW() + $3::interval
+         WHERE token = $1::uuid",
+    )
+    .bind(token)
+    .bind(created_ago)
+    .bind(expires_in)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn session_expiry_in_days(pool: &PgPool, token: &str) -> f64 {
+    sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM (expires_at - NOW()))::float8 / 86400 FROM sessions WHERE token = $1::uuid",
+    )
+    .bind(token)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn session_set_cookie(response: &axum::response::Response) -> Option<String> {
+    response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("qsets_session="))
+        .map(str::to_string)
+}
+
+#[sqlx::test]
+async fn activity_renews_a_session_and_refreshes_its_cookie(pool: PgPool) {
+    let app = app(&pool);
+    let tier = public_tier(&pool).await;
+    let user = create_user(&pool, "sliding", tier, false, false).await;
+    let token = session(&pool, user).await;
+
+    // Used 5 days ago: 9 days left. The next request restarts the 14-day window.
+    set_session_dates(&pool, &token, "5 days", "9 days").await;
+    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = session_set_cookie(&response).expect("renewal re-sends the cookie");
+    assert!(cookie.contains("Max-Age=12"), "{cookie}"); // 14 days = 1209600 s
+    assert!(session_expiry_in_days(&pool, &token).await > 13.9);
+
+    // A second request straight after is within the renewal interval: no write, no cookie.
+    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    assert!(session_set_cookie(&response).is_none());
+}
+
+#[sqlx::test]
+async fn renewal_never_passes_the_absolute_cap(pool: PgPool) {
+    let app = app(&pool);
+    let tier = public_tier(&pool).await;
+    let user = create_user(&pool, "capped", tier, false, false).await;
+    let token = session(&pool, user).await;
+
+    // Created 85 days ago, so only 5 days of the 90-day cap remain.
+    set_session_dates(&pool, &token, "85 days", "2 days").await;
+    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let days = session_expiry_in_days(&pool, &token).await;
+    assert!((4.9..=5.0).contains(&days), "{days}");
+
+    // At the cap there is nothing left to extend.
+    set_session_dates(&pool, &token, "90 days", "1 hour").await;
+    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    assert!(session_set_cookie(&response).is_none());
+    assert!(session_expiry_in_days(&pool, &token).await < 0.1);
+}
+
+#[sqlx::test]
+async fn expired_sessions_are_not_revived_and_logout_keeps_its_own_cookie(pool: PgPool) {
+    let app = app(&pool);
+    let tier = public_tier(&pool).await;
+    let user = create_user(&pool, "expired", tier, false, false).await;
+    let token = session(&pool, user).await;
+
+    set_session_dates(&pool, &token, "20 days", "-1 hour").await;
+    let (status, _) = send(&app, get("/api/me", Some(&token))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(session_expiry_in_days(&pool, &token).await < 0.0);
+
+    // Logging out must clear the cookie rather than have it renewed on the way out.
+    let live = session(&pool, user).await;
+    set_session_dates(&pool, &live, "5 days", "9 days").await;
+    let response = app
+        .clone()
+        .oneshot(
+            request(Method::POST, "/api/logout", Some(&live))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = session_set_cookie(&response).unwrap();
+    assert!(cookie.contains("Max-Age=0"), "{cookie}");
+}
+
+#[sqlx::test]
+async fn me_reports_when_the_session_ends(pool: PgPool) {
+    let app = app(&pool);
+    let tier = public_tier(&pool).await;
+    let user = create_user(&pool, "lease", tier, false, false).await;
+    let token = session(&pool, user).await;
+    let (status, body) = send(&app, get("/api/me", Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["session_expires_at"].as_str().is_some(), "{body}");
+}
+
+#[sqlx::test]
+async fn audit_entries_name_their_targets_even_after_deletion(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let admin = create_user(&pool, "admin", public, true, true).await;
+    let admin_session = session(&pool, admin).await;
+    let tier = create_tier(&pool, "regional", 1).await;
+    let doomed = create_user(&pool, "doomed-user", tier, false, false).await;
+    let pool_id = create_pool(&pool, "named-pool", public).await;
+
+    send(&app, generate_request(pool_id, json!({}))).await;
+    send(&app, login_attempt("no-such-user", "x", "")).await;
+    let (status, _) = send(
+        &app,
+        request(Method::DELETE, &format!("/api/admin/users/{doomed}"), Some(&admin_session))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = send(&app, get("/api/admin/audit", Some(&admin_session))).await;
+    let entries = body["entries"].as_array().unwrap();
+    let find = |action: &str| entries.iter().find(|e| e["action"] == action).unwrap();
+
+    assert_eq!(find("questions.generated")["target_name"], "named-pool");
+    assert_eq!(find("login.failed")["target_name"], "no-such-user");
+    // The user is gone, but the event recorded who it was.
+    let deleted = find("user.deleted");
+    assert_eq!(deleted["target_id"], doomed.to_string());
+    assert_eq!(deleted["target_name"], "doomed-user");
+}
+
+#[sqlx::test]
+async fn pwa_files_are_served_with_the_right_scope_and_caching(pool: PgPool) {
+    let app = app(&pool);
+
+    let response = app.clone().oneshot(get("/sw.js", None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(response.headers()["service-worker-allowed"], "/");
+    assert!(response.headers()[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .contains("javascript"));
+
+    let response = app
+        .clone()
+        .oneshot(get("/static/manifest.webmanifest", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let manifest: Value = serde_json::from_slice(&bytes).unwrap();
+    for icon in manifest["icons"].as_array().unwrap() {
+        let uri = icon["src"].as_str().unwrap();
+        let response = app.clone().oneshot(get(uri, None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+
+    // Pages must link the manifest; the offline fallback must exist for the worker to serve.
+    for page in ["/", "/study", "/login"] {
+        let response = app.clone().oneshot(get(page, None)).await.unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("rel=\"manifest\""), "{page}");
+    }
+    // Static files revalidate on every use and answer conditional requests with a 304.
+    let response = app
+        .clone()
+        .oneshot(get("/static/offline.html", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+    let modified = response.headers()[header::LAST_MODIFIED].clone();
+    let response = app
+        .clone()
+        .oneshot(
+            request(Method::GET, "/static/offline.html", None)
+                .header(header::IF_MODIFIED_SINCE, modified)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+}
