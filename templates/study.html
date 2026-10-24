@@ -13,7 +13,7 @@
   <script src="/static/pwa.js" defer></script>
   <link rel="stylesheet" href="/static/style.css?v=ui-consistency-1" />
 </head>
-<body data-csrf="{{ csrf_token }}">
+<body data-csrf="{{ csrf_token }}"{% if offline_shell %} data-offline-shell="true"{% endif %}>
   {% include "_header.html" %}
   <main class="study-page">
     <section class="page-intro" id="studyIntro">
@@ -71,7 +71,7 @@
       </div>
     </section>
   </main>
-  <script src="/static/header.js"></script>
-  <script type="module" src="/static/study.js?v=study-30s-1"></script>
+  <script src="/static/header.js?v=offline-1"></script>
+  <script type="module" src="/static/study.js?v=offline-1"></script>
 </body>
 </html>

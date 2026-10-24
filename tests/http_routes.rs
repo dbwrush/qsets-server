@@ -2441,3 +2441,73 @@ async fn pwa_files_are_served_with_the_right_scope_and_caching(pool: PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
 }
+
+#[sqlx::test]
+async fn whole_pool_download_needs_a_user_respects_tiers_and_is_audited(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let high = create_tier(&pool, "high", 5).await;
+    let low_user = create_user(&pool, "low", public, false, false).await;
+    let admin = create_user(&pool, "admin", public, true, true).await;
+    let low_session = session(&pool, low_user).await;
+    let admin_session = session(&pool, admin).await;
+    let open_pool = create_pool(&pool, "open-pool", public).await;
+    let high_pool = create_pool(&pool, "high-pool", high).await;
+    let uri = |id: i32| format!("/api/pools/{id}/questions");
+
+    // Anonymous visitors can study public pools online but cannot keep a copy.
+    let (status, _) = send(&app, get(&uri(open_pool), None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, get(&uri(high_pool), Some(&low_session))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let response = app
+        .clone()
+        .oneshot(get(&uri(open_pool), Some(&low_session)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["pool"]["name"], "open-pool");
+    assert!(body["pool"]["updated_at"].as_str().is_some());
+    assert!(!body["questions"].as_array().unwrap().is_empty());
+    assert_eq!(body["questions"][0]["answer"].as_str().is_some(), true);
+    assert_eq!(body["books"][0]["name"], "John");
+
+    let (status, _) = send(&app, get(&uri(high_pool), Some(&admin_session))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, audit) = send(&app, get("/api/admin/audit?action=pool.downloaded", Some(&admin_session))).await;
+    let entries = audit["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|e| e["actor_username"] == "low" && e["target_name"] == "open-pool"));
+}
+
+#[sqlx::test]
+async fn offline_study_shell_is_anonymous_and_cookie_free(pool: PgPool) {
+    let app = app(&pool);
+    let tier = public_tier(&pool).await;
+    let user = create_user(&pool, "shell-user", tier, false, false).await;
+    let token = session(&pool, user).await;
+
+    // Even a signed-in request gets the anonymous page, so one cached copy is safe for all.
+    let response = app
+        .clone()
+        .oneshot(get("/study/offline", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("data-offline-shell=\"true\""));
+    assert!(html.contains("data-csrf=\"\""));
+    assert!(!html.contains("shell-user"));
+
+    let response = app.clone().oneshot(get("/study", Some(&token))).await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(!String::from_utf8_lossy(&bytes).contains("data-offline-shell"));
+}
