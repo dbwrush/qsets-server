@@ -1227,20 +1227,19 @@ async fn delete_tier(
         ));
     }
 
-    let (tier_id, tier_name) = sqlx::query_as::<_, (i32, String)>(
-        "DELETE FROM tiers WHERE id = $1 RETURNING id, name",
-    )
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|error| {
-            if is_foreign_key_violation(&error) {
-                ApiError::conflict("Tier is still assigned to users or pools")
-            } else {
-                db_error("Failed to delete tier")(error)
-            }
-        })?
-        .ok_or_else(tier_not_found)?;
+    let (tier_id, tier_name) =
+        sqlx::query_as::<_, (i32, String)>("DELETE FROM tiers WHERE id = $1 RETURNING id, name")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|error| {
+                if is_foreign_key_violation(&error) {
+                    ApiError::conflict("Tier is still assigned to users or pools")
+                } else {
+                    db_error("Failed to delete tier")(error)
+                }
+            })?
+            .ok_or_else(tier_not_found)?;
 
     audit::record(
         &state.pool,
@@ -1528,11 +1527,11 @@ async fn delete_user(
     let (user_id, username) = sqlx::query_as::<_, (i32, String)>(
         "DELETE FROM users WHERE id = $1 RETURNING id, username",
     )
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(db_error("Failed to delete user"))?
-        .ok_or_else(user_not_found)?;
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(db_error("Failed to delete user"))?
+    .ok_or_else(user_not_found)?;
 
     audit::record(
         &state.pool,

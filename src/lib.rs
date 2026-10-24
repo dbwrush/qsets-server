@@ -53,11 +53,15 @@ async fn slide_session(State(state): State<AppState>, request: Request, next: Ne
     let Some((token, expires_at)) = renewed else {
         return response;
     };
-    let sets_session = response.headers().get_all(header::SET_COOKIE).iter().any(|value| {
-        value
-            .to_str()
-            .is_ok_and(|v| v.starts_with(&format!("{}=", auth::SESSION_COOKIE)))
-    });
+    let sets_session = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|v| v.starts_with(&format!("{}=", auth::SESSION_COOKIE)))
+        });
     if !sets_session {
         let jar = auth::add_session_cookie(CookieJar::new(), token.to_string(), expires_at);
         for cookie in jar.iter() {

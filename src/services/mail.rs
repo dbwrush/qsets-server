@@ -9,6 +9,8 @@ use lettre::{
     AsyncTransport, Message, Tokio1Executor,
 };
 
+// async_trait marks the boxed future `#[must_use]`, which newer clippy reports as a duplicate.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Mailer: Send + Sync {
     async fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String>;
