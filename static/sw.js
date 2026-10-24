@@ -8,7 +8,8 @@
 // The one page kept is /study/offline, an anonymous copy of the study page (no session, no
 // CSRF token). It is what /study shows without a connection; the page itself then reads the
 // encrypted pools saved on the device. See static/vault.mjs.
-const CACHE = "qsets-static-v2";
+// Bump when a precached file changes: installed copies only refetch the list on a new worker.
+const CACHE = "qsets-static-v3";
 const OFFLINE_URL = "/static/offline.html";
 const STUDY_URL = "/study";
 const STUDY_SHELL_URL = "/study/offline";
