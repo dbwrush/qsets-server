@@ -2282,14 +2282,22 @@ async fn activity_renews_a_session_and_refreshes_its_cookie(pool: PgPool) {
 
     // Used 5 days ago: 9 days left. The next request restarts the 14-day window.
     set_session_dates(&pool, &token, "5 days", "9 days").await;
-    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(get("/api/me", Some(&token)))
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let cookie = session_set_cookie(&response).expect("renewal re-sends the cookie");
     assert!(cookie.contains("Max-Age=12"), "{cookie}"); // 14 days = 1209600 s
     assert!(session_expiry_in_days(&pool, &token).await > 13.9);
 
     // A second request straight after is within the renewal interval: no write, no cookie.
-    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(get("/api/me", Some(&token)))
+        .await
+        .unwrap();
     assert!(session_set_cookie(&response).is_none());
 }
 
@@ -2302,14 +2310,22 @@ async fn renewal_never_passes_the_absolute_cap(pool: PgPool) {
 
     // Created 85 days ago, so only 5 days of the 90-day cap remain.
     set_session_dates(&pool, &token, "85 days", "2 days").await;
-    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(get("/api/me", Some(&token)))
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let days = session_expiry_in_days(&pool, &token).await;
     assert!((4.9..=5.0).contains(&days), "{days}");
 
     // At the cap there is nothing left to extend.
     set_session_dates(&pool, &token, "90 days", "1 hour").await;
-    let response = app.clone().oneshot(get("/api/me", Some(&token))).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(get("/api/me", Some(&token)))
+        .await
+        .unwrap();
     assert!(session_set_cookie(&response).is_none());
     assert!(session_expiry_in_days(&pool, &token).await < 0.1);
 }
@@ -2367,9 +2383,13 @@ async fn audit_entries_name_their_targets_even_after_deletion(pool: PgPool) {
     send(&app, login_attempt("no-such-user", "x", "")).await;
     let (status, _) = send(
         &app,
-        request(Method::DELETE, &format!("/api/admin/users/{doomed}"), Some(&admin_session))
-            .body(Body::empty())
-            .unwrap(),
+        request(
+            Method::DELETE,
+            &format!("/api/admin/users/{doomed}"),
+            Some(&admin_session),
+        )
+        .body(Body::empty())
+        .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -2473,16 +2493,25 @@ async fn whole_pool_download_needs_a_user_respects_tiers_and_is_audited(pool: Pg
     assert_eq!(body["pool"]["name"], "open-pool");
     assert!(body["pool"]["updated_at"].as_str().is_some());
     assert!(!body["questions"].as_array().unwrap().is_empty());
-    assert_eq!(body["questions"][0]["answer"].as_str().is_some(), true);
+    assert!(body["questions"][0]["answer"].as_str().is_some());
     assert_eq!(body["books"][0]["name"], "John");
 
     let (status, _) = send(&app, get(&uri(high_pool), Some(&admin_session))).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_, audit) = send(&app, get("/api/admin/audit?action=pool.downloaded", Some(&admin_session))).await;
+    let (_, audit) = send(
+        &app,
+        get(
+            "/api/admin/audit?action=pool.downloaded",
+            Some(&admin_session),
+        ),
+    )
+    .await;
     let entries = audit["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
-    assert!(entries.iter().any(|e| e["actor_username"] == "low" && e["target_name"] == "open-pool"));
+    assert!(entries
+        .iter()
+        .any(|e| e["actor_username"] == "low" && e["target_name"] == "open-pool"));
 }
 
 #[sqlx::test]
@@ -2507,7 +2536,11 @@ async fn offline_study_shell_is_anonymous_and_cookie_free(pool: PgPool) {
     assert!(html.contains("data-csrf=\"\""));
     assert!(!html.contains("shell-user"));
 
-    let response = app.clone().oneshot(get("/study", Some(&token))).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(get("/study", Some(&token)))
+        .await
+        .unwrap();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(!String::from_utf8_lossy(&bytes).contains("data-offline-shell"));
 }
