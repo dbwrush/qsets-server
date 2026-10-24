@@ -59,6 +59,9 @@ struct IndexTemplate<'a> {
 struct StudyTemplate<'a> {
     csrf_token: &'a str,
     header: Header,
+    /// The copy the service worker keeps for studying without a connection: anonymous, with no
+    /// session or CSRF token in it, so one cached copy is safe for everyone.
+    offline_shell: bool,
 }
 
 #[derive(Template)]
@@ -125,6 +128,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/study", get(study_page))
+        .route("/study/offline", get(study_offline_shell))
         .route("/login", get(login))
         .route("/register", get(register_page))
         .route("/forgot-password", get(forgot_password_page))
@@ -146,8 +150,25 @@ async fn study_page(State(state): State<AppState>, jar: CookieJar) -> Response {
         StudyTemplate {
             csrf_token: &csrf,
             header: Header::new(user.as_ref()),
+            offline_shell: false,
         },
     )
+}
+
+async fn study_offline_shell() -> Response {
+    let mut response = render(
+        CookieJar::new(),
+        StudyTemplate {
+            csrf_token: "",
+            header: Header::new(None),
+            offline_shell: true,
+        },
+    );
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    response
 }
 
 async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {

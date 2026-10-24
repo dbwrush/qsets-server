@@ -1,4 +1,6 @@
 import { QUESTION_MS, answersMatch, timing, summarize } from "./study-session.mjs?v=study-30s-1";
+import { selectQuestions } from "./study-core.mjs?v=offline-1";
+import { syncDeviceVault, wipeDeviceVault } from "./vault.mjs?v=offline-1";
 
 const $ = id => document.getElementById(id);
 const TYPES = ["General", "According-To", "Situation", "In-What-Book-and-Chapter", "Quote", "Reference", "Verse", "Context"];
@@ -12,6 +14,13 @@ let reviewQuestions = [];
 let passageVersion = 0;
 let active = false;
 
+// Installed app only: an encrypted copy of the pools in use, so sessions also work offline.
+// `vault` is null in a browser tab, where questions always come from the server.
+let vault = null;
+let offline = document.body.dataset.offlineShell === "true";
+let pools = new Map();
+let localPool = null;
+
 async function api(url, body) {
   const response = await fetch(url, body === undefined ? {} : {
     method: "POST",
@@ -19,8 +28,44 @@ async function api(url, body) {
     body: JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Request failed");
+  if (!response.ok) {
+    // The session is gone, so the copy on this device no longer belongs to anyone.
+    if (response.status === 401) await wipeDeviceVault();
+    const error = new Error(data.error || "Request failed");
+    error.status = response.status;
+    throw error;
+  }
   return data;
+}
+
+// The device copy of a pool, downloading or refreshing it first when online. Null when the
+// pool cannot be kept on this device, in which case the server is used instead.
+async function localCopy(summary) {
+  if (!vault) return null;
+  try {
+    const copy = await vault.loadPool(summary.id);
+    if (offline || (copy && copy.updated_at === summary.updated_at)) return copy;
+    $("studySetupStatus").textContent = "Saving for offline use...";
+    const data = await api(`/api/pools/${summary.id}/questions`);
+    await vault.savePool({ ...data.pool, books: data.books, questions: data.questions });
+    return await vault.loadPool(summary.id);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      offline = true;
+      return vault.loadPool(summary.id);
+    }
+    if (error.status) throw error;
+    console.error("Could not keep this pool on the device:", error);
+    return null;
+  }
+}
+
+// Pools the user can no longer reach are removed from the device.
+async function dropRevokedCopies(available) {
+  const ids = new Set(available.map(pool => String(pool.id)));
+  for (const meta of await vault.pools()) {
+    if (!ids.has(String(meta.id))) await vault.dropPool(meta.id);
+  }
 }
 
 function show(section) {
@@ -34,7 +79,10 @@ async function loadPassages() {
   $("studyPassages").replaceChildren();
   $("studySetupStatus").textContent = "Loading passages...";
   try {
-    const data = await api(`/api/pools/${$("studyPool").value}/books`);
+    const summary = pools.get(Number($("studyPool").value));
+    localPool = summary ? await localCopy(summary) : null;
+    if (offline && !localPool) throw new Error("This pool is not saved on this device.");
+    const data = localPool ? { books: localPool.books } : await api(`/api/pools/${$("studyPool").value}/books`);
     if (version !== passageVersion) return;
     for (const book of data.books) {
       const row = document.createElement("div");
@@ -63,7 +111,7 @@ async function loadPassages() {
       });
       $("studyPassages").append(row);
     }
-    $("studySetupStatus").textContent = data.books.length ? "" : "No passages available in this pool.";
+    $("studySetupStatus").textContent = data.books.length ? (offline ? "Offline: using pools saved on this device." : "") : "No passages available in this pool.";
     $("studyStart").disabled = !data.books.length;
   } catch (error) {
     if (version === passageVersion) $("studySetupStatus").textContent = error.message;
@@ -96,8 +144,10 @@ $("studySetupForm").addEventListener("submit", async event => {
   $("studyStart").disabled = true;
   $("studySetupStatus").textContent = "Loading questions...";
   try {
-    const data = await api("/api/study/questions", { pool_id: Number($("studyPool").value), books, types, count });
-    begin(data.questions);
+    const selected = localPool
+      ? selectQuestions(localPool.questions, { books, types, count })
+      : (await api("/api/study/questions", { pool_id: Number($("studyPool").value), books, types, count })).questions;
+    begin(selected);
     $("studySetupStatus").textContent = "";
   } catch (error) {
     $("studySetupStatus").textContent = error.message;
@@ -246,20 +296,61 @@ $("studyAgain").addEventListener("click", () => {
   show("studySetup");
 });
 
-try {
-  const data = await api("/api/pools");
-  for (const pool of data.pools) {
+async function init() {
+  if (offline) {
+    // Opened from the offline copy of this page: nothing can be fetched, so go straight to the device.
+    ({ vault } = await syncDeviceVault(() => Promise.reject(new TypeError("offline"))));
+  } else {
+    const synced = await syncDeviceVault(async () => {
+      try {
+        return await api("/api/me");
+      } catch (error) {
+        if (error.status === 401) return null;
+        throw error;
+      }
+    });
+    // Signed out: no copy. Unreachable (offline) keeps it, and the stored lease decides.
+    vault = synced.me || synced.offline ? synced.vault : null;
+    offline = synced.offline;
+  }
+
+  let list;
+  if (!offline) {
+    try {
+      list = (await api("/api/pools")).pools;
+      if (vault) await dropRevokedCopies(list);
+    } catch (error) {
+      if (!(error instanceof TypeError && vault)) throw error;
+      offline = true;
+    }
+  }
+  if (offline) {
+    list = vault ? await vault.pools() : [];
+    if (!list.length) {
+      $("studySetupStatus").textContent = vault
+        ? "You're offline and no pools are saved on this device yet. Open the pools you want while online first."
+        : "You're offline. Offline study is available in the installed app once you've signed in.";
+      return;
+    }
+  }
+
+  pools = new Map(list.map(pool => [pool.id, pool]));
+  for (const pool of list) {
     const option = document.createElement("option");
     option.value = pool.id;
     option.textContent = `${pool.name} (${pool.tier_name})`;
     $("studyPool").append(option);
   }
-  if (data.pools.length) {
+  if (list.length) {
     $("studyPool").disabled = false;
     await loadPassages();
   } else {
     $("studySetupStatus").textContent = "No pools available.";
   }
+}
+
+try {
+  await init();
 } catch (error) {
   $("studySetupStatus").textContent = `Could not load pools: ${error.message}`;
 }

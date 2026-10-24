@@ -4,12 +4,24 @@
 // header, so a stored copy would be stale or belong to someone else. Navigations go to the
 // network and fall back to a static offline page. /api/ is never touched. Only /static/ files,
 // which hold no per-user data, are cached.
-const CACHE = "qsets-static-v1";
+//
+// The one page kept is /study/offline, an anonymous copy of the study page (no session, no
+// CSRF token). It is what /study shows without a connection; the page itself then reads the
+// encrypted pools saved on the device. See static/vault.mjs.
+const CACHE = "qsets-static-v2";
 const OFFLINE_URL = "/static/offline.html";
+const STUDY_URL = "/study";
+const STUDY_SHELL_URL = "/study/offline";
 const PRECACHE = [
   OFFLINE_URL,
+  STUDY_SHELL_URL,
   "/static/style.css",
   "/static/theme.js",
+  "/static/header.js",
+  "/static/study.js",
+  "/static/study-core.mjs",
+  "/static/study-session.mjs",
+  "/static/vault.mjs",
   "/static/favicon.svg",
   "/static/icons/icon-192.png",
 ];
@@ -57,6 +69,15 @@ async function staticFile(request) {
   }
 }
 
+async function refreshStudyShell() {
+  try {
+    const response = await fetch(STUDY_SHELL_URL, { cache: "no-cache" });
+    if (response.ok) await (await caches.open(CACHE)).put(STUDY_SHELL_URL, response);
+  } catch {
+    /* keep the copy already stored */
+  }
+}
+
 self.addEventListener("fetch", event => {
   const { request } = event;
   if (request.method !== "GET") return;
@@ -64,8 +85,17 @@ self.addEventListener("fetch", event => {
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === "navigate") {
+    const study = url.pathname === STUDY_URL;
     event.respondWith(
-      fetch(request).catch(() => caches.match(OFFLINE_URL).then(page => page || Response.error())),
+      fetch(request).then(response => {
+        // Online: keep the offline study page as current as the deployed one.
+        if (study) event.waitUntil(refreshStudyShell());
+        return response;
+      }).catch(async () => {
+        const page = await caches.match(study ? STUDY_SHELL_URL : OFFLINE_URL)
+          || await caches.match(OFFLINE_URL);
+        return page || Response.error();
+      }),
     );
   } else if (url.pathname.startsWith("/static/")) {
     event.respondWith(staticFile(request));

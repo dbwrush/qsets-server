@@ -100,7 +100,7 @@ browser memory with the batch and hidden until submission/reveal; this is practi
 not a cheat-resistant examination. Answers, timing, and results are never submitted
 to the server. Existing shared/private pool permissions apply.
 
-JavaScript study logic tests: `node --test tests/study-session.test.mjs`.
+JavaScript tests (study logic, offline selection, encrypted vault): `node --test tests/*.test.mjs`.
 
 ## Environment
 

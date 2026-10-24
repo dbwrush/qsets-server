@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/pools/:id", put(replace_pool).delete(delete_pool))
         .route("/api/pools/:id/books", get(pool_books))
+        .route("/api/pools/:id/questions", get(pool_questions))
         .route("/api/tiers", get(list_assignable_tiers))
         .route("/api/generate", post(generate))
         .route("/api/generate/validate", post(validate_custom_generation))
@@ -837,6 +838,47 @@ async fn pool_books(State(state): State<AppState>, actor: Actor, Path(id): Path<
             "tier_name": pool.tier_name,
         },
     }))
+}
+
+/// A whole pool, for the installed app to keep an encrypted copy on the device. Needs a signed-in
+/// user, since the copy is tied to one and wiped when their session ends. Every download is
+/// audited because this is the one place questions leave in bulk.
+async fn pool_questions(
+    State(state): State<AppState>,
+    client: ClientMeta,
+    actor: Actor,
+    Path(id): Path<i32>,
+) -> ApiResult {
+    let user_id = require_user(&actor)?;
+    let pool = authorize_pool_access(&state, &actor, id).await?;
+    let parsed = parsed_pool(&state, &pool).await?;
+
+    audit::record(
+        &state.pool,
+        &client,
+        Some(user_id),
+        "pool.downloaded",
+        "question_pool",
+        pool.id,
+        json!({"name": pool.name, "count": parsed.len()}),
+    )
+    .await;
+
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "pool": {
+                "id": pool.id,
+                "name": pool.name,
+                "tier_id": pool.tier_id,
+                "tier_name": pool.tier_name,
+                "updated_at": pool.updated_at,
+            },
+            "books": generator::list_books(parsed.as_ref()),
+            "questions": parsed.as_ref(),
+        })),
+    )
+        .into_response())
 }
 
 fn one_set() -> usize {

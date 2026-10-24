@@ -44,18 +44,61 @@
     if (e.relatedTarget && !menu.contains(e.relatedTarget) && e.relatedTarget !== menuButton) setMenu(false);
   });
 
+  // ── Offline copy of question pools (installed app only) ──
+  // The copy belongs to the signed-in user: it is wiped on logout and whenever a page shows
+  // nobody signed in, and its lease is renewed from /api/me. The study page does this itself.
+  const PENDING_LOGOUT = "qsets-pending-logout";
+  const installed = window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+
+  function pendingLogout() {
+    try { return localStorage.getItem(PENDING_LOGOUT) === "1"; } catch (e) { return false; }
+  }
+  function setPendingLogout(value) {
+    try { value ? localStorage.setItem(PENDING_LOGOUT, "1") : localStorage.removeItem(PENDING_LOGOUT); } catch (e) { /* nothing to do */ }
+  }
+  const logoutRequest = () => fetch("/api/logout", {
+    method: "POST",
+    headers: { "x-csrf-token": document.body.dataset.csrf || "" },
+  });
+
+  if (pendingLogout()) {
+    // A logout that could not reach the server earlier: finish it as soon as there is a connection.
+    logoutRequest().then((res) => {
+      if (res.ok) { setPendingLogout(false); window.location.reload(); }
+    }).catch(() => {});
+  } else if (installed && !document.body.dataset.offlineShell && window.location.pathname !== "/study") {
+    import("/static/vault.mjs?v=offline-1").then(({ syncDeviceVault, wipeDeviceVault }) => {
+      if (!document.getElementById("user-menu-button")) return wipeDeviceVault();
+      return syncDeviceVault(async () => {
+        const res = await fetch("/api/me");
+        if (res.status === 401) return null;
+        if (!res.ok) throw new Error(`Session check failed (${res.status})`);
+        return res.json();
+      });
+    }).catch((err) => console.error("Offline data sync failed:", err));
+  }
+
   // ── Logout ──
   document.getElementById("logout-link")?.addEventListener("click", async (e) => {
     e.preventDefault();
+    // Offline copies go first, so they are gone even if the server cannot be reached.
     try {
-      const res = await fetch("/api/logout", {
-        method: "POST",
-        headers: { "x-csrf-token": document.body.dataset.csrf || "" },
-      });
+      const { wipeDeviceVault } = await import("/static/vault.mjs?v=offline-1");
+      await wipeDeviceVault();
+    } catch (err) {
+      console.error("Could not clear offline data:", err);
+    }
+    try {
+      const res = await logoutRequest();
       if (!res.ok) throw new Error(`Logout failed (${res.status})`);
       window.location.href = "/";
     } catch (err) {
       console.error("Logout failed:", err);
+      if (err instanceof TypeError) {
+        // Offline: sign out on the server as soon as the app is online again.
+        setPendingLogout(true);
+        window.location.href = "/";
+      }
     }
   });
 })();
