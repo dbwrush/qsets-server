@@ -6,6 +6,11 @@
   <title>{% if is_admin %}QSets Admin{% else %}My pools — QSets{% endif %}</title>
   <script src="/static/theme.js"></script>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#f3ede2" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)" />
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+  <script src="/static/pwa.js" defer></script>
   <link rel="stylesheet" href="/static/style.css?v=ui-consistency-1" />
 </head>
 <body data-csrf="{{ csrf_token }}">
@@ -169,6 +174,6 @@ Example question text,General,John 1:1,Example answer</code></pre>
   </footer>
 
   <script src="/static/header.js"></script>
-  <script src="/static/admin.js?v=ui-consistency-1"></script>
+  <script src="/static/admin.js?v=audit-names-1"></script>
 </body>
 </html>

@@ -3,13 +3,20 @@ use argon2::{
     Argon2,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use std::sync::LazyLock;
 use uuid::Uuid;
 
 pub const SESSION_COOKIE: &str = "qsets_session";
 pub const MIN_PASSWORD_LEN: usize = 8;
+/// A session stays valid this long after its last activity.
+const SESSION_IDLE_DAYS: i64 = 14;
+/// No session outlives this, however active it is.
+const SESSION_MAX_DAYS: i64 = 90;
+/// Activity only renews a session once this much of its lifetime has been used, so a burst of
+/// requests costs one write rather than one each.
+const SESSION_RENEW_AFTER: Duration = Duration::days(1);
 
 /// Shared password policy for every path that sets a password.
 pub fn validate_password(password: &str) -> Result<(), String> {
@@ -122,7 +129,7 @@ pub async fn create_default_admin(
 
 pub async fn create_session(pool: &PgPool, user_id: i32) -> Result<String, String> {
     let token = Uuid::new_v4();
-    let expires_at = Utc::now() + Duration::days(14);
+    let expires_at = Utc::now() + Duration::days(SESSION_IDLE_DAYS);
 
     sqlx::query("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)")
         .bind(token)
@@ -135,17 +142,62 @@ pub async fn create_session(pool: &PgPool, user_id: i32) -> Result<String, Strin
     Ok(token.to_string())
 }
 
-pub fn add_session_cookie(jar: CookieJar, token: String) -> CookieJar {
+/// Sets the session cookie to last until `expires_at`, so the browser keeps it across restarts for
+/// as long as the server would accept it.
+pub fn add_session_cookie(jar: CookieJar, token: String, expires_at: DateTime<Utc>) -> CookieJar {
     let secure = std::env::var("COOKIE_SECURE")
         .map(|v| v == "true")
         .unwrap_or(false);
+    let remaining = (expires_at - Utc::now()).num_seconds().max(0);
     let cookie = Cookie::build((SESSION_COOKIE, token))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
         .secure(secure)
+        .max_age(time::Duration::seconds(remaining))
         .build();
     jar.add(cookie)
+}
+
+/// Expiry for a session created now.
+pub fn new_session_expiry() -> DateTime<Utc> {
+    Utc::now() + Duration::days(SESSION_IDLE_DAYS)
+}
+
+/// Extends the session behind `token` after activity and returns its new expiry, or `None` when
+/// it was not extended (unknown, expired, or renewed recently). The idle window restarts from now
+/// but never passes the absolute cap measured from when the session was created.
+pub async fn renew_session(pool: &PgPool, token: Uuid) -> Option<DateTime<Utc>> {
+    sqlx::query_scalar::<_, DateTime<Utc>>(
+        "UPDATE sessions
+         SET expires_at = LEAST(NOW() + make_interval(days => $2), created_at + make_interval(days => $3))
+         WHERE token = $1
+           AND expires_at > NOW()
+           AND expires_at < LEAST(NOW() + make_interval(days => $2), created_at + make_interval(days => $3))
+                            - make_interval(secs => $4)
+         RETURNING expires_at",
+    )
+    .bind(token)
+    .bind(SESSION_IDLE_DAYS as i32)
+    .bind(SESSION_MAX_DAYS as i32)
+    .bind(SESSION_RENEW_AFTER.num_seconds() as f64)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// When the caller's current session ends, if they have a valid one.
+pub async fn session_expiry(pool: &PgPool, jar: &CookieJar) -> Option<DateTime<Utc>> {
+    let token = session_token(jar)?;
+    sqlx::query_scalar::<_, DateTime<Utc>>(
+        "SELECT expires_at FROM sessions WHERE token = $1 AND expires_at > NOW()",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
 }
 
 pub fn clear_session_cookie(jar: CookieJar) -> CookieJar {

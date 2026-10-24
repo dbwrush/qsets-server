@@ -224,7 +224,7 @@ async fn login(
     )
     .await;
 
-    let jar = auth::add_session_cookie(jar, token);
+    let jar = auth::add_session_cookie(jar, token, auth::new_session_expiry());
     Ok((jar, Json(json!({"message": "Logged in"}))).into_response())
 }
 
@@ -252,7 +252,7 @@ async fn logout(State(state): State<AppState>, client: ClientMeta, jar: CookieJa
     (jar, Json(json!({"message": "Logged out"}))).into_response()
 }
 
-async fn me(State(state): State<AppState>, actor: Actor) -> ApiResult {
+async fn me(State(state): State<AppState>, actor: Actor, jar: CookieJar) -> ApiResult {
     let user_id = require_user(&actor)?;
     let user = sqlx::query_as::<_, User>(
         "SELECT id, username, password_hash, email, email_verified_at, is_admin, can_upload_pools, tier_id, created_at FROM users WHERE id = $1",
@@ -270,6 +270,7 @@ async fn me(State(state): State<AppState>, actor: Actor) -> ApiResult {
         "is_admin": user.is_admin,
         "can_upload_pools": user.can_upload_pools,
         "tier_id": user.tier_id,
+        "session_expires_at": auth::session_expiry(&state.pool, &jar).await,
     }))
 }
 
@@ -1184,7 +1185,9 @@ async fn delete_tier(
         ));
     }
 
-    let tier_id = sqlx::query_scalar::<_, i32>("DELETE FROM tiers WHERE id = $1 RETURNING id")
+    let (tier_id, tier_name) = sqlx::query_as::<_, (i32, String)>(
+        "DELETE FROM tiers WHERE id = $1 RETURNING id, name",
+    )
         .bind(id)
         .fetch_optional(&state.pool)
         .await
@@ -1204,7 +1207,7 @@ async fn delete_tier(
         "tier.deleted",
         "tier",
         tier_id,
-        json!({}),
+        json!({"name": tier_name}),
     )
     .await;
     ok(json!({"deleted": tier_id}))
@@ -1480,7 +1483,9 @@ async fn delete_user(
         return Err(ApiError::bad_request("You cannot delete your own account"));
     }
 
-    let user_id = sqlx::query_scalar::<_, i32>("DELETE FROM users WHERE id = $1 RETURNING id")
+    let (user_id, username) = sqlx::query_as::<_, (i32, String)>(
+        "DELETE FROM users WHERE id = $1 RETURNING id, username",
+    )
         .bind(id)
         .fetch_optional(&state.pool)
         .await
@@ -1494,7 +1499,7 @@ async fn delete_user(
         "user.deleted",
         "user",
         user_id,
-        json!({}),
+        json!({"username": username}),
     )
     .await;
     ok(json!({"deleted": user_id}))

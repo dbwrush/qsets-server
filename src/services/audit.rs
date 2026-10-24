@@ -43,6 +43,11 @@ pub struct AuditEntry {
     pub action: String,
     pub target_type: String,
     pub target_id: Option<String>,
+    /// What `target_id` refers to, by name: the current one if it still exists, else the name
+    /// recorded in the event's metadata.
+    pub target_name: Option<String>,
+    /// Name of the tier in the event's `tier_id`, if it has one and the tier still exists.
+    pub tier_name: Option<String>,
     pub metadata: Value,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
@@ -58,9 +63,22 @@ pub async fn list(
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
     sqlx::query_as::<_, AuditEntry>(
         "SELECT a.id, a.created_at, a.actor_user_id, u.username AS actor_username, a.action,
-                a.target_type, a.target_id, a.metadata, a.ip_address, a.user_agent
+                a.target_type, a.target_id,
+                CASE
+                    WHEN a.action = 'login.failed' AND a.metadata->>'reason' = 'user_not_found'
+                        THEN a.target_id
+                    WHEN a.target_type = 'user' THEN COALESCE(tu.username, a.metadata->>'username')
+                    WHEN a.target_type = 'question_pool' THEN COALESCE(tp.name, a.metadata->>'name')
+                    WHEN a.target_type = 'tier' THEN COALESCE(tt.name, a.metadata->>'name')
+                END AS target_name,
+                mt.name AS tier_name,
+                a.metadata, a.ip_address, a.user_agent
          FROM audit_logs a
          LEFT JOIN users u ON u.id = a.actor_user_id
+         LEFT JOIN users tu ON a.target_type = 'user' AND tu.id::text = a.target_id
+         LEFT JOIN question_pools tp ON a.target_type = 'question_pool' AND tp.id::text = a.target_id
+         LEFT JOIN tiers tt ON a.target_type = 'tier' AND tt.id::text = a.target_id
+         LEFT JOIN tiers mt ON mt.id::text = a.metadata->>'tier_id'
          WHERE ($1::bigint IS NULL OR a.id < $1)
            AND ($2::text IS NULL OR starts_with(a.action, $2))
          ORDER BY a.id DESC
