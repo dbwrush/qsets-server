@@ -141,6 +141,14 @@ async fn main() {
         .await
         .expect("failed to run migrations");
 
+    match qsets_server::services::pool_types::backfill(&pool).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "recorded question types for existing pools"),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not record question types for existing pools")
+        }
+    }
+
     auth::create_default_admin(&pool, &admin_username, &admin_password)
         .await
         .expect("failed to create default admin");

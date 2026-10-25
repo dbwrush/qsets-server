@@ -1454,3 +1454,41 @@ body {
 .pool-notice-body { margin: 0 0 1.25rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pool-notice-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
 .set-note { font-style: italic; color: var(--muted); margin: 0 0 1rem; white-space: pre-wrap; }
+
+/* A question type the selected pool does not have. */
+.radio-option.unavailable, .form-group.unavailable, #studyTypes label.unavailable { opacity: 0.45; cursor: not-allowed; }
+.radio-option.unavailable *, .form-group.unavailable *, #studyTypes label.unavailable * { cursor: not-allowed; }
+
+/* ── Pool editor: sticky toolbar and windowed question list ── */
+.editor-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  gap: 0.6rem;
+  margin: 0 -0.5rem 0.75rem;
+  padding: 0.75rem 0.5rem;
+  background: var(--sheet);
+  border-bottom: 1px solid var(--rule);
+}
+.editor-bar-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.editor-bar-row input[type="search"] { flex: 1 1 14rem; min-width: 0; }
+.editor-bar-row select { flex: 0 1 12rem; }
+.editor-count { color: var(--muted); margin-right: auto; }
+.editor-save-status { font-size: 0.9rem; }
+.editor-save-status.error { color: var(--danger); }
+/* Only the rows near the screen exist; each sits at its place in the full-height list. */
+.editor-list { position: relative; }
+.editor-row { position: absolute; left: 0; right: 0; box-sizing: border-box; }
+button.editor-row-summary {
+  display: flex; align-items: center; gap: 0.75rem; width: 100%; height: 100%;
+  padding: 0 0.75rem; text-align: left; font: inherit; color: var(--ink);
+  background: transparent; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; cursor: pointer;
+}
+button.editor-row-summary:hover { background: var(--accent-tint); }
+.editor-row-num { flex: 0 0 3.2rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.editor-row-type { flex: 0 0 auto; font-size: 0.75rem; padding: 0.1rem 0.45rem; border: 1px solid var(--rule); border-radius: 999px; color: var(--muted); }
+.editor-row-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-row-ref { flex: 0 0 auto; color: var(--muted); font-size: 0.9rem; }
+.editor-row-open .editor-question { margin: 0.25rem 0 0.5rem; background: var(--sheet-2); }
+@media (max-width: 640px) { .editor-row-ref { display: none; } }

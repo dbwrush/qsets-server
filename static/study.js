@@ -84,6 +84,7 @@ async function loadPassages() {
     if (offline && !localPool) throw new Error("This pool is not saved on this device.");
     const data = localPool ? { books: localPool.books } : await api(`/api/pools/${$("studyPool").value}/books`);
     if (version !== passageVersion) return;
+    applyPoolTypes(localPool ? countTypes(localPool.questions) : summary?.type_counts);
     for (const book of data.books) {
       const row = document.createElement("div");
       row.className = "study-passage";
@@ -115,6 +116,29 @@ async function loadPassages() {
     $("studyStart").disabled = !data.books.length;
   } catch (error) {
     if (version === passageVersion) $("studySetupStatus").textContent = error.message;
+  }
+}
+
+function countTypes(questions) {
+  const counts = {};
+  for (const question of questions) {
+    const type = TYPES.find(t => t.toLowerCase() === String(question.type).toLowerCase());
+    if (type) counts[type] = (counts[type] || 0) + 1;
+  }
+  return counts;
+}
+
+// Gray out, and untick, the question types the chosen pool has none of; the rest start ticked.
+// Without counts (a pool the server has not counted yet) every type stays available.
+function applyPoolTypes(counts) {
+  const known = counts && Object.keys(counts).length;
+  for (const input of $("studyTypes").querySelectorAll("input")) {
+    const unavailable = Boolean(known) && !(counts[input.value] > 0);
+    input.disabled = unavailable;
+    input.checked = !unavailable;
+    const label = input.closest("label");
+    label.classList.toggle("unavailable", unavailable);
+    label.title = unavailable ? "This pool has no questions of this type." : "";
   }
 }
 

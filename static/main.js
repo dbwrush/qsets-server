@@ -72,6 +72,7 @@ async function initializeGenerator() {
   document.getElementById("startOver")?.addEventListener("click", () => {
     window.scrollTo({ top: 0 });
     document.querySelector('input[name="questionType"][value="situation"]').checked = true;
+    applyPoolTypes();
     syncCustomMode();
     showStep("step-1");
   });
@@ -129,6 +130,7 @@ function selectPool(row) {
   document.querySelectorAll("#pool-section tr").forEach(r => r.classList.remove("row-selected"));
   row.classList.add("row-selected");
   selectedPoolId = parseInt(row.dataset.poolId);
+  applyPoolTypes();
   customAvailable = null;
   customValid = false;
   validationVersion++;
@@ -205,6 +207,48 @@ function selectedBookFilters() {
     filters.push({ name: book.name, start_chapter: Math.min(s, e), end_chapter: Math.max(s, e) });
   });
   return filters;
+}
+
+// ── Question types the selected pool offers ──
+// The server keeps a count per type for each pool. A pool with no record (an empty object)
+// is treated as offering everything, so nothing is grayed out on a guess.
+function selectedPoolTypes() {
+  const counts = availablePools.find(pool => pool.id === selectedPoolId)?.type_counts;
+  return counts && Object.keys(counts).length ? counts : null;
+}
+
+function setModeAvailable(value, available, reason) {
+  const input = document.querySelector(`input[name="questionType"][value="${value}"]`);
+  input.disabled = !available;
+  const label = input.closest("label");
+  label.classList.toggle("unavailable", !available);
+  label.title = available ? "" : reason;
+}
+
+// Standard sets open with one Situation or one In-What-Book-and-Chapter question, depending on the
+// year. Offer whichever the pool has, pick it for the user, and gray out the other. Custom is
+// always available, but types the pool lacks are grayed out there.
+function applyPoolTypes() {
+  const counts = selectedPoolTypes();
+  const has = type => !counts || (counts[type] || 0) > 0;
+  const situation = has("Situation");
+  const inWhatBook = has("In-What-Book-and-Chapter");
+  setModeAvailable("situation", situation, "This pool has no Situation questions.");
+  setModeAvailable("inWhatBook", inWhatBook, "This pool has no In What Book & Chapter questions.");
+  const checked = document.querySelector('input[name="questionType"]:checked');
+  if (!checked || checked.disabled) {
+    const fallback = situation ? "situation" : inWhatBook ? "inWhatBook" : "custom";
+    document.querySelector(`input[name="questionType"][value="${fallback}"]`).checked = true;
+  }
+  document.querySelectorAll("#customCounts input").forEach(input => {
+    const unavailable = !has(input.dataset.questionType);
+    input.disabled = unavailable;
+    if (unavailable) input.value = "0";
+    const group = input.closest(".form-group");
+    group.classList.toggle("unavailable", unavailable);
+    group.title = unavailable ? "This pool has no questions of this type." : "";
+  });
+  syncCustomMode();
 }
 
 // ── Generation ──

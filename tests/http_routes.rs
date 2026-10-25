@@ -2645,3 +2645,87 @@ async fn pool_messages_default_empty_save_and_reach_listings_downloads_and_gener
     assert_eq!(loaded["popup_message"], "");
     assert_eq!(loaded["print_message"], "");
 }
+
+#[sqlx::test]
+async fn pool_type_counts_follow_every_way_the_questions_change(pool: PgPool) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let admin = create_user(&pool, "types-admin", public, true, false).await;
+    let admin_session = session(&pool, admin).await;
+    let counts = |listing: &Value, name: &str| {
+        listing["pools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+            .unwrap()["type_counts"]
+            .clone()
+    };
+
+    // Upload records the counts.
+    let csv = "Question,Type,Reference,Answer\nA?,Situation,John 1:1,a\nB?,General,John 1:2,b\nC?,General,John 1:3,c\n";
+    let (status, _) = send(&app, upload_request(&admin_session, "typed", public, csv)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    let c = counts(&listing, "typed");
+    assert_eq!(c["Situation"], 1);
+    assert_eq!(c["General"], 2);
+    assert_eq!(c["In-What-Book-and-Chapter"], 0);
+    let id = listing["pools"][0]["id"].as_i64().unwrap();
+
+    // Replacing the CSV updates them.
+    let csv = "Question,Type,Reference,Answer\nA?,In-What-Book-and-Chapter,John 1:1,a\n";
+    let (status, _) = send(&app, replace_request(&admin_session, id as i32, csv)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    let c = counts(&listing, "typed");
+    assert_eq!(c["In-What-Book-and-Chapter"], 1);
+    assert_eq!(c["Situation"], 0);
+
+    // So does the online editor, on create and on save.
+    let uri = format!("/api/pools/{id}/editor");
+    let (_, loaded) = send(&app, get(&uri, Some(&admin_session))).await;
+    let edit = json!({
+        "name": "typed", "tier_id": public, "updated_at": loaded["updated_at"],
+        "questions": [
+            {"question": "Q?", "type": "Quote", "reference": "John 1:1", "answer": "a"},
+            {"question": "R?", "type": "Quote", "reference": "John 1:2", "answer": "b"},
+        ],
+    });
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), edit),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/pools/create",
+            Some(&admin_session),
+            json!({"name": "made", "tier_id": public, "questions": [
+                {"question": "V?", "type": "Verse", "reference": "John 1:1", "answer": "v"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    assert_eq!(counts(&listing, "typed")["Quote"], 2);
+    assert_eq!(counts(&listing, "typed")["In-What-Book-and-Chapter"], 0);
+    assert_eq!(counts(&listing, "made")["Verse"], 1);
+
+    // Pools stored before counts were tracked are filled in at startup.
+    let old = create_pool(&pool, "old", public).await;
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    assert_eq!(counts(&listing, "old"), json!({}));
+    let filled = qsets_server::services::pool_types::backfill(&pool)
+        .await
+        .unwrap();
+    assert_eq!(filled, 1);
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    assert!(
+        counts(&listing, "old")["General"].as_i64().unwrap() > 0,
+        "{old}"
+    );
+}

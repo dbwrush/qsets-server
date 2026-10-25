@@ -20,7 +20,7 @@ use crate::{
     services::{
         accounts, audit, auth,
         authz::{self, Actor, PoolAccess},
-        generator,
+        generator, pool_types,
         security::ClientMeta,
     },
     state::AppState,
@@ -395,12 +395,13 @@ async fn pool_listing(state: &AppState, actor: &Actor, managed: bool) -> ApiResu
         updated_at: chrono::DateTime<chrono::Utc>,
         popup_message: String,
         print_message: String,
+        type_counts: serde_json::Value,
     }
 
     let pools = sqlx::query_as::<_, PoolRow>(
         "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank,
                 qp.created_by, u.username AS created_by_username, qp.updated_at,
-                qp.popup_message, qp.print_message
+                qp.popup_message, qp.print_message, qp.type_counts
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
          LEFT JOIN users u ON u.id = qp.created_by
@@ -430,6 +431,7 @@ async fn pool_listing(state: &AppState, actor: &Actor, managed: bool) -> ApiResu
                 "updated_at": p.updated_at,
                 "popup_message": p.popup_message,
                 "print_message": p.print_message,
+                "type_counts": p.type_counts,
                 "created_by": p.created_by,
                 "created_by_username": p.created_by_username,
                 "can_manage": authz::can_manage_pool(actor, p.created_by, p.tier_rank),
@@ -625,8 +627,8 @@ async fn create_pool_online(
     let csv = validate_editor_body(&state, &actor, &body, None).await?;
     let (popup_message, print_message) = pool_messages(&body)?;
     let (id, updated_at): (i32, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "INSERT INTO question_pools (name, tier_id, csv_text, created_by, popup_message, print_message)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, updated_at",
+        "INSERT INTO question_pools (name, tier_id, csv_text, created_by, popup_message, print_message, type_counts)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, updated_at",
     )
     .bind(body.name.trim())
     .bind(body.tier_id)
@@ -634,6 +636,7 @@ async fn create_pool_online(
     .bind(user_id)
     .bind(popup_message)
     .bind(print_message)
+    .bind(pool_types::type_counts(&body.questions))
     .fetch_one(&state.pool)
     .await
     .map_err(pool_write_error)?;
@@ -669,7 +672,7 @@ async fn save_pool_editor(
     let (popup_message, print_message) = pool_messages(&body)?;
     let updated_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
         "UPDATE question_pools SET name = $1, tier_id = $2, csv_text = $3,
-             popup_message = $6, print_message = $7,
+             popup_message = $6, print_message = $7, type_counts = $8,
              updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
          WHERE id = $4 AND updated_at = $5 RETURNING updated_at",
     )
@@ -680,6 +683,7 @@ async fn save_pool_editor(
     .bind(version)
     .bind(popup_message)
     .bind(print_message)
+    .bind(pool_types::type_counts(&body.questions))
     .fetch_optional(&state.pool)
     .await
     .map_err(pool_write_error)?
@@ -736,8 +740,8 @@ async fn upload_pool(
     let validation = validate_pool_csv(&csv)?;
 
     let pool = sqlx::query_as::<_, QuestionPool>(
-        "INSERT INTO question_pools (name, tier_id, csv_text, created_by)
-            VALUES ($1, $2, $3, $4)
+        "INSERT INTO question_pools (name, tier_id, csv_text, created_by, type_counts)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id, name, tier_id, csv_text, popup_message, print_message,
                       created_by, created_at, updated_at",
     )
@@ -745,6 +749,7 @@ async fn upload_pool(
     .bind(tier)
     .bind(&csv)
     .bind(user_id)
+    .bind(pool_types::type_counts_for_csv(&csv))
     .fetch_one(&state.pool)
     .await
     .map_err(|error| {
@@ -797,10 +802,12 @@ async fn replace_pool(
     let validation = validate_pool_csv(&csv)?;
 
     sqlx::query_scalar::<_, i32>(
-        "UPDATE question_pools SET csv_text = $1, updated_at = NOW() WHERE id = $2 RETURNING id",
+        "UPDATE question_pools SET csv_text = $1, type_counts = $3, updated_at = NOW()
+         WHERE id = $2 RETURNING id",
     )
     .bind(&csv)
     .bind(id)
+    .bind(pool_types::type_counts_for_csv(&csv))
     .fetch_optional(&state.pool)
     .await
     .map_err(db_error("Failed to replace pool"))?
