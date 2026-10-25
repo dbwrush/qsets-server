@@ -326,6 +326,7 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
   }
 
   const status = document.getElementById("generateStatus");
+  if (!(await window.qsetsPoolNotice(availablePools.find(p => p.id === selectedPoolId)))) return;
   generating = true;
   updateGenerateButton();
   status.textContent = "Generating…";
@@ -410,9 +411,9 @@ function displayResults(sets, prefix) {
   const legend = Object.entries(TYPE_ABBREV)
     .map(([name, code]) => `<span><b>${code}</b> ${escapeHtml(name.replace(/-/g, " "))}</span>`)
     .join("");
-  const sourceHtml = source
-    ? `<p class="set-source">${escapeHtml(passages || source)}</p>`
-    : "";
+  const note = generatedPool?.print_message || "";
+  const sourceHtml = (source ? `<p class="set-source">${escapeHtml(passages || source)}</p>` : "")
+    + (note ? `<p class="set-note">${escapeHtml(note)}</p>` : "");
   container.innerHTML = `${sourceHtml}<div class="type-legend" aria-label="Question type codes">${legend}</div>${html}`;
   showStep("results");
 
@@ -469,7 +470,10 @@ function buildRtf(roundNames, sets, sectionTag) {
   const header = `{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0\\fswiss Arial;}{\\f1\\froman Times New Roman;}}{\\header \\pard\\plain\\qr \\fs16 ${escapeRtf(sectionTag)}\\par}{\\footer \\pard\\plain\\ql \\fs14 ${escapeRtf(sectionTag)}\\par}\\viewkind4\\uc1\\pard\\f0\\fs22 `;
   const body = sets.map((set, si) => {
     const name = roundNames[si] || `SET #${si + 1}`;
-    const h = `\\pard\\qc\\b\\fs28 ${escapeRtf(name)}\\b0\\fs22\\par\\par`;
+    const note = generatedPool?.print_message
+      ? `\\pard\\qc\\i\\fs20 ${escapeRtf(generatedPool.print_message)}\\i0\\fs22\\par\\par`
+      : "";
+    const h = `\\pard\\qc\\b\\fs28 ${escapeRtf(name)}\\b0\\fs22\\par\\par${note}`;
     const qs = set.map((q, qi) => {
       const t = typeCode(q.type || q.qtype || "General");
       return `\\pard\\fi-360\\li360\\fs22 ${t}\\tab ${qi + 1}. ${escapeRtf(q.question || "")}\\par\\tab A. ${escapeRtf(q.answer || "")} (${escapeRtf(q.reference || "")})\\par\\par`;

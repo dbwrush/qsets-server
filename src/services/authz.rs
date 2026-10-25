@@ -53,6 +53,8 @@ pub struct PoolAccess {
     pub tier_rank: i32,
     pub created_by: Option<i32>,
     pub updated_at: DateTime<Utc>,
+    pub popup_message: String,
+    pub print_message: String,
 }
 
 /// Shared pools inherit access from lower ranks; private pools need an ownership check.
@@ -154,7 +156,7 @@ pub async fn load_pool_access(
 ) -> Result<Option<PoolAccess>, sqlx::Error> {
     sqlx::query_as::<_, PoolAccess>(
         "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank,
-                qp.created_by, qp.updated_at
+                qp.created_by, qp.updated_at, qp.popup_message, qp.print_message
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
          WHERE qp.id = $1",
@@ -322,6 +324,8 @@ mod tests {
             tier_rank: PRIVATE_TIER_RANK,
             created_by: Some(1),
             updated_at: Utc::now(),
+            popup_message: String::new(),
+            print_message: String::new(),
         };
         assert!(!can_access_pool(&Actor::anonymous(), PRIVATE_TIER_RANK));
         assert!(!can_read_pool(&Actor::anonymous(), &pool));

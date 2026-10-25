@@ -1418,7 +1418,7 @@ input[type="text"], input:not([type]), input[type="email"], input[type="password
   }
 
   .site-header, .site-footer, .page-intro, .stepper, .wizard-nav,
-  .results-toolbar, .toggle-answers, .type-legend { display: none !important; }
+  .results-toolbar, .toggle-answers, .type-legend, .pool-notice { display: none !important; }
 
   main { padding: 0; max-width: none; }
   .panel { border: none; box-shadow: none; padding: 0; }
@@ -1438,3 +1438,19 @@ body {
 }
 .site-header { padding-top: env(safe-area-inset-top); }
 .site-footer { padding-bottom: calc(1.5rem + env(safe-area-inset-bottom)); }
+
+/* ── Pool pop-up message ── */
+.pool-notice {
+  max-width: min(32rem, calc(100vw - 2rem));
+  padding: 1.5rem 1.75rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.pool-notice::backdrop { background: rgba(0, 0, 0, 0.5); }
+.pool-notice h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
+.pool-notice-body { margin: 0 0 1.25rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pool-notice-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+.set-note { font-style: italic; color: var(--muted); margin: 0 0 1rem; white-space: pre-wrap; }

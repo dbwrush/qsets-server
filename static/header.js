@@ -102,3 +102,40 @@
     }
   });
 })();
+
+// A pool's pop-up message, shown before generating sets from or studying the pool. Resolves true
+// to carry on and false if the reader cancels; a pool without a message resolves true at once.
+window.qsetsPoolNotice = function (pool) {
+  const message = (pool && pool.popup_message) || "";
+  if (!message.trim()) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "pool-notice";
+    dialog.setAttribute("aria-labelledby", "poolNoticeTitle");
+    const title = document.createElement("h2");
+    title.id = "poolNoticeTitle";
+    title.textContent = pool.name || "Notice";
+    const body = document.createElement("p");
+    body.className = "pool-notice-body";
+    body.textContent = message;
+    const actions = document.createElement("div");
+    actions.className = "pool-notice-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn btn-ghost";
+    cancel.textContent = "Cancel";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "btn btn-primary";
+    ok.textContent = "Continue";
+    actions.append(cancel, ok);
+    dialog.append(title, body, actions);
+    let accepted = false;
+    ok.addEventListener("click", () => { accepted = true; dialog.close(); });
+    cancel.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("close", () => { dialog.remove(); resolve(accepted); });
+    document.body.append(dialog);
+    dialog.showModal();
+    ok.focus();
+  });
+};

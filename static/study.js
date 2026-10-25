@@ -142,6 +142,10 @@ $("studySetupForm").addEventListener("submit", async event => {
     return;
   }
   $("studyStart").disabled = true;
+  if (!(await window.qsetsPoolNotice(pools.get(Number($("studyPool").value))))) {
+    $("studyStart").disabled = false;
+    return;
+  }
   $("studySetupStatus").textContent = "Loading questions...";
   try {
     const selected = localPool

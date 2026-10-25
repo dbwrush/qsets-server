@@ -26,6 +26,16 @@
           <div class="form-group"><label for="poolName">Pool name</label><input id="poolName" required /></div>
           <div class="form-group"><label for="poolTier">Visibility / tier</label><select id="poolTier" required></select></div>
         </div>
+        <div class="form-group">
+          <label for="poolPopup">Pop-up message <span class="hint">(optional)</span></label>
+          <textarea id="poolPopup" rows="3" maxlength="2000"></textarea>
+          <p class="hint">Shown to anyone who tries to generate sets from, or study, this pool. Leave empty for none.</p>
+        </div>
+        <div class="form-group">
+          <label for="poolPrint">Printed message <span class="hint">(optional)</span></label>
+          <textarea id="poolPrint" rows="2" maxlength="500"></textarea>
+          <p class="hint">Printed on generated sets and at the top of each set in the downloaded RTF. Leave empty for none.</p>
+        </div>
         </section>
         <h2>Questions</h2>
         <div id="editorQuestions"></div>
@@ -38,6 +48,6 @@
     </form>
   </main>
   <script src="/static/header.js?v=offline-1"></script>
-  <script type="module" src="/static/pool-editor.js?v=ui-consistency-1"></script>
+  <script type="module" src="/static/pool-editor.js?v=pool-messages-1"></script>
 </body>
 </html>

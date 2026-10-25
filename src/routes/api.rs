@@ -393,11 +393,14 @@ async fn pool_listing(state: &AppState, actor: &Actor, managed: bool) -> ApiResu
         created_by: Option<i32>,
         created_by_username: Option<String>,
         updated_at: chrono::DateTime<chrono::Utc>,
+        popup_message: String,
+        print_message: String,
     }
 
     let pools = sqlx::query_as::<_, PoolRow>(
         "SELECT qp.id, qp.name, qp.tier_id, t.name AS tier_name, t.rank AS tier_rank,
-                qp.created_by, u.username AS created_by_username, qp.updated_at
+                qp.created_by, u.username AS created_by_username, qp.updated_at,
+                qp.popup_message, qp.print_message
          FROM question_pools qp
          JOIN tiers t ON qp.tier_id = t.id
          LEFT JOIN users u ON u.id = qp.created_by
@@ -425,6 +428,8 @@ async fn pool_listing(state: &AppState, actor: &Actor, managed: bool) -> ApiResu
                 "tier_name": p.tier_name,
                 "tier_rank": p.tier_rank,
                 "updated_at": p.updated_at,
+                "popup_message": p.popup_message,
+                "print_message": p.print_message,
                 "created_by": p.created_by,
                 "created_by_username": p.created_by_username,
                 "can_manage": authz::can_manage_pool(actor, p.created_by, p.tier_rank),
@@ -488,6 +493,30 @@ struct PoolEditorBody {
     tier_id: i32,
     questions: Vec<generator::QuestionRecord>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    popup_message: String,
+    #[serde(default)]
+    print_message: String,
+}
+
+const MAX_POPUP_MESSAGE_CHARS: usize = 2000;
+const MAX_PRINT_MESSAGE_CHARS: usize = 500;
+
+/// The pool's two optional messages, trimmed. Empty means the pool has no such message.
+fn pool_messages(body: &PoolEditorBody) -> ApiResult<(String, String)> {
+    let popup = body.popup_message.trim();
+    let print = body.print_message.trim();
+    if popup.chars().count() > MAX_POPUP_MESSAGE_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "The pop-up message must be {MAX_POPUP_MESSAGE_CHARS} characters or fewer"
+        )));
+    }
+    if print.chars().count() > MAX_PRINT_MESSAGE_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "The printed message must be {MAX_PRINT_MESSAGE_CHARS} characters or fewer"
+        )));
+    }
+    Ok((popup.to_string(), print.to_string()))
 }
 
 async fn editor_tiers(
@@ -537,6 +566,7 @@ async fn pool_editor(
         Json(json!({
             "id": pool.id, "name": pool.name, "tier_id": pool.tier_id,
             "updated_at": pool.updated_at, "questions": generator::parse_csv(&csv),
+            "popup_message": pool.popup_message, "print_message": pool.print_message,
             "tiers": tiers,
         })),
     )
@@ -593,14 +623,17 @@ async fn create_pool_online(
         ));
     }
     let csv = validate_editor_body(&state, &actor, &body, None).await?;
+    let (popup_message, print_message) = pool_messages(&body)?;
     let (id, updated_at): (i32, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "INSERT INTO question_pools (name, tier_id, csv_text, created_by)
-         VALUES ($1, $2, $3, $4) RETURNING id, updated_at",
+        "INSERT INTO question_pools (name, tier_id, csv_text, created_by, popup_message, print_message)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, updated_at",
     )
     .bind(body.name.trim())
     .bind(body.tier_id)
     .bind(csv)
     .bind(user_id)
+    .bind(popup_message)
+    .bind(print_message)
     .fetch_one(&state.pool)
     .await
     .map_err(pool_write_error)?;
@@ -633,8 +666,10 @@ async fn save_pool_editor(
         .updated_at
         .ok_or_else(|| ApiError::bad_request("Missing pool version; reload the editor"))?;
     let csv = validate_editor_body(&state, &actor, &body, Some(pool.tier_id)).await?;
+    let (popup_message, print_message) = pool_messages(&body)?;
     let updated_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
         "UPDATE question_pools SET name = $1, tier_id = $2, csv_text = $3,
+             popup_message = $6, print_message = $7,
              updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
          WHERE id = $4 AND updated_at = $5 RETURNING updated_at",
     )
@@ -643,6 +678,8 @@ async fn save_pool_editor(
     .bind(csv)
     .bind(id)
     .bind(version)
+    .bind(popup_message)
+    .bind(print_message)
     .fetch_optional(&state.pool)
     .await
     .map_err(pool_write_error)?
@@ -701,7 +738,8 @@ async fn upload_pool(
     let pool = sqlx::query_as::<_, QuestionPool>(
         "INSERT INTO question_pools (name, tier_id, csv_text, created_by)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, name, tier_id, csv_text, created_by, created_at, updated_at",
+            RETURNING id, name, tier_id, csv_text, popup_message, print_message,
+                      created_by, created_at, updated_at",
     )
     .bind(name)
     .bind(tier)
@@ -873,6 +911,8 @@ async fn pool_questions(
                 "tier_id": pool.tier_id,
                 "tier_name": pool.tier_name,
                 "updated_at": pool.updated_at,
+                "popup_message": pool.popup_message,
+                "print_message": pool.print_message,
             },
             "books": generator::list_books(parsed.as_ref()),
             "questions": parsed.as_ref(),
@@ -1100,6 +1140,7 @@ async fn generate(
             "name": source_pool.name,
             "tier_id": source_pool.tier_id,
             "tier_name": source_pool.tier_name,
+            "print_message": source_pool.print_message,
         },
     }))
 }

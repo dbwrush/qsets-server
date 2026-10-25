@@ -28,6 +28,8 @@ pub struct QuestionPool {
     pub name: String,
     pub tier_id: i32,
     pub csv_text: String,
+    pub popup_message: String,
+    pub print_message: String,
     pub created_by: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

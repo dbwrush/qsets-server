@@ -107,6 +107,7 @@ $("poolEditor").addEventListener("submit", async event => {
       method: id ? "PUT" : "POST",
       body: JSON.stringify({
         name: $("poolName").value, tier_id: Number($("poolTier").value), questions, updated_at: version,
+        popup_message: $("poolPopup").value, print_message: $("poolPrint").value,
       }),
     });
     id = String(data.id);
@@ -130,6 +131,8 @@ try {
   if (id) {
     const pool = await api(`/api/pools/${id}/editor`);
     $("poolName").value = pool.name;
+    $("poolPopup").value = pool.popup_message || "";
+    $("poolPrint").value = pool.print_message || "";
     version = pool.updated_at;
     tiers = pool.tiers;
     for (const question of pool.questions) addQuestion(question);

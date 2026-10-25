@@ -2544,3 +2544,104 @@ async fn offline_study_shell_is_anonymous_and_cookie_free(pool: PgPool) {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(!String::from_utf8_lossy(&bytes).contains("data-offline-shell"));
 }
+
+#[sqlx::test]
+async fn pool_messages_default_empty_save_and_reach_listings_downloads_and_generation(
+    pool: PgPool,
+) {
+    let app = app(&pool);
+    let public = public_tier(&pool).await;
+    let admin = create_user(&pool, "message-admin", public, true, false).await;
+    let admin_session = session(&pool, admin).await;
+    let plain = create_pool(&pool, "plain", public).await;
+
+    // A pool nobody configured has no messages anywhere.
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    assert_eq!(listing["pools"][0]["popup_message"], "");
+    assert_eq!(listing["pools"][0]["print_message"], "");
+    let (_, download) = send(
+        &app,
+        get(
+            &format!("/api/pools/{plain}/questions"),
+            Some(&admin_session),
+        ),
+    )
+    .await;
+    assert_eq!(download["pool"]["popup_message"], "");
+
+    let uri = format!("/api/pools/{plain}/editor");
+    let (_, loaded) = send(&app, get(&uri, Some(&admin_session))).await;
+    let mut edit = json!({
+        "name": "plain", "tier_id": public, "updated_at": loaded["updated_at"],
+        "questions": loaded["questions"],
+        "popup_message": "  Practice questions only.\nNot for real quizzes.  ",
+        "print_message": "  Test pool  ",
+    });
+    let (status, saved) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (_, loaded) = send(&app, get(&uri, Some(&admin_session))).await;
+    assert_eq!(
+        loaded["popup_message"],
+        "Practice questions only.\nNot for real quizzes."
+    );
+    assert_eq!(loaded["print_message"], "Test pool");
+    let (_, listing) = send(&app, get("/api/pools", None)).await;
+    assert_eq!(
+        listing["pools"][0]["popup_message"],
+        "Practice questions only.\nNot for real quizzes."
+    );
+    let (_, download) = send(
+        &app,
+        get(
+            &format!("/api/pools/{plain}/questions"),
+            Some(&admin_session),
+        ),
+    )
+    .await;
+    assert_eq!(download["pool"]["print_message"], "Test pool");
+    let (status, generated) = send(
+        &app,
+        json_request(
+            Method::POST,
+            "/api/generate",
+            None,
+            json!({"pool_id": plain, "question_type": "all", "count": 1, "sets": 1}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{generated}");
+    assert_eq!(generated["pool"]["print_message"], "Test pool");
+
+    // Messages are limited in length, and saving without them clears them.
+    edit["updated_at"] = loaded["updated_at"].clone();
+    edit["popup_message"] = json!("x".repeat(2001));
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    edit["popup_message"] = json!("");
+    edit["print_message"] = json!("y".repeat(501));
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    edit["print_message"] = json!("");
+    let (status, _) = send(
+        &app,
+        json_request(Method::PUT, &uri, Some(&admin_session), edit),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, loaded) = send(&app, get(&uri, Some(&admin_session))).await;
+    assert_eq!(loaded["popup_message"], "");
+    assert_eq!(loaded["print_message"], "");
+}
