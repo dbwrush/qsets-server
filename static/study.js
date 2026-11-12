@@ -1,6 +1,7 @@
 import { QUESTION_MS, answersMatch, timing, summarize } from "./study-session.mjs?v=study-30s-1";
 import { selectQuestions } from "./study-core.mjs?v=offline-1";
 import { syncDeviceVault, wipeDeviceVault } from "./vault.mjs?v=offline-1";
+import { createStore } from "./local-store.mjs?v=local-1";
 
 const $ = id => document.getElementById(id);
 const TYPES = ["General", "According-To", "Situation", "In-What-Book-and-Chapter", "Quote", "Reference", "Verse", "Context"];
@@ -20,6 +21,8 @@ let vault = null;
 let offline = document.body.dataset.offlineShell === "true";
 let pools = new Map();
 let localPool = null;
+// Question sets the user keeps on this device (see local-store.mjs); they appear after the pools.
+const localSets = createStore();
 
 async function api(url, body) {
   const response = await fetch(url, body === undefined ? {} : {
@@ -79,8 +82,10 @@ async function loadPassages() {
   $("studyPassages").replaceChildren();
   $("studySetupStatus").textContent = "Loading passages...";
   try {
-    const summary = pools.get(Number($("studyPool").value));
-    localPool = summary ? await localCopy(summary) : null;
+    const value = $("studyPool").value;
+    const summary = pools.get(Number(value));
+    localPool = value.startsWith("local:") ? await localSets.pool(value.slice(6))
+      : summary ? await localCopy(summary) : null;
     if (offline && !localPool) throw new Error("This pool is not saved on this device.");
     const data = localPool ? { books: localPool.books } : await api(`/api/pools/${$("studyPool").value}/books`);
     if (version !== passageVersion) return;
@@ -342,6 +347,8 @@ async function init() {
     offline = synced.offline;
   }
 
+  let ownSets = [];
+  try { ownSets = await localSets.list(); } catch { /* storage unavailable: no sets of your own */ }
   let list;
   if (!offline) {
     try {
@@ -354,7 +361,7 @@ async function init() {
   }
   if (offline) {
     list = vault ? await vault.pools() : [];
-    if (!list.length) {
+    if (!list.length && !ownSets.length) {
       $("studySetupStatus").textContent = vault
         ? "You're offline and no pools are saved on this device yet. Open the pools you want while online first."
         : "You're offline. Offline study is available in the installed app once you've signed in.";
@@ -369,7 +376,13 @@ async function init() {
     option.textContent = `${pool.name} (${pool.tier_name})`;
     $("studyPool").append(option);
   }
-  if (list.length) {
+  for (const set of ownSets) {
+    const option = document.createElement("option");
+    option.value = `local:${set.id}`;
+    option.textContent = `${set.name} (on this device)`;
+    $("studyPool").append(option);
+  }
+  if (list.length || ownSets.length) {
     $("studyPool").disabled = false;
     await loadPassages();
   } else {

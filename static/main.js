@@ -29,6 +29,13 @@ let customAvailable = null;
 let validationVersion = 0;
 let validationTimer;
 let generating = false;
+// A question set kept on this device is chosen instead of a server pool; it is read, checked and
+// turned into sets here in the browser, with no request to the server.
+let localPoolData = null;
+const localModules = () => Promise.all([
+  import("/static/generator-core.mjs?v=local-1"),
+  import("/static/local-store.mjs?v=local-1"),
+]);
 
 // One-letter question type codes; shared by the on-screen sets and the RTF export.
 const TYPE_ABBREV = { "According-To": "A", General: "G", "In-What-Book-and-Chapter": "I", Quote: "Q", Reference: "R", Situation: "S", Context: "X", Verse: "V" };
@@ -98,44 +105,82 @@ if (document.readyState === "loading") {
 // ── Pool Selection (table) ──
 async function loadPools() {
   const section = document.getElementById("pool-section");
+  let html = "";
   try {
     const data = await api("/api/pools");
     availablePools = data.pools || [];
-
     if (availablePools.length === 0) {
-      section.innerHTML = '<p class="msg-info">No pools available.</p>';
-      return;
-    }
-
-    let html = `<table class="data-table">
+      html += '<p class="msg-info">No pools available.</p>';
+    } else {
+      html += `<table class="data-table">
       <thead><tr><th>Pool Name</th><th>Tier</th></tr></thead><tbody>`;
-    availablePools.forEach(pool => {
-      html += `<tr class="clickable" data-pool-id="${pool.id}">
+      availablePools.forEach(pool => {
+        html += `<tr class="clickable" data-pool-id="${pool.id}">
         <td>${escapeHtml(pool.name)}</td>
         <td>${escapeHtml(pool.tier_name)}</td>
       </tr>`;
+      });
+      html += "</tbody></table>";
+    }
+  } catch (err) {
+    html += `<p class="msg-error">Failed to load pools: ${escapeHtml(err.message)}</p>`;
+  }
+
+  let own = [];
+  try {
+    const [, store] = await localModules();
+    own = await store.createStore().list();
+  } catch { /* storage unavailable: only server pools are offered */ }
+  if (own.length) {
+    html += `<h3 class="local-heading">On this device</h3>
+      <p class="msg-info">Question sets you added yourself. They stay in this browser.</p>
+      <table class="data-table"><thead><tr><th>Name</th><th>Questions</th></tr></thead><tbody>`;
+    own.forEach(set => {
+      html += `<tr class="clickable" data-local-id="${escapeHtml(set.id)}">
+        <td>${escapeHtml(set.name)}</td><td>${set.questions}</td></tr>`;
     });
     html += "</tbody></table>";
-    section.innerHTML = html;
-
-    section.querySelectorAll("tr.clickable").forEach(row => {
-      row.addEventListener("click", () => selectPool(row));
-    });
-  } catch (err) {
-    section.innerHTML = `<p class="msg-error">Failed to load pools: ${escapeHtml(err.message)}</p>`;
   }
+  html += '<p class="msg-info local-link"><a href="/files">Add your own question sets</a></p>';
+  section.innerHTML = html;
+  section.querySelectorAll("tr.clickable").forEach(row => {
+    row.addEventListener("click", () => selectPool(row));
+  });
 }
 
 function selectPool(row) {
   document.querySelectorAll("#pool-section tr").forEach(r => r.classList.remove("row-selected"));
   row.classList.add("row-selected");
-  selectedPoolId = parseInt(row.dataset.poolId);
-  applyPoolTypes();
+  const localId = row.dataset.localId;
+  selectedPoolId = localId ? null : parseInt(row.dataset.poolId);
+  localPoolData = null;
   customAvailable = null;
   customValid = false;
   validationVersion++;
+  if (localId) { void selectLocalPool(localId); return; }
+  applyPoolTypes();
   updateGenerateButton();
   void loadPoolBooks(selectedPoolId);
+}
+
+async function selectLocalPool(id) {
+  const container = document.getElementById("bookSelection");
+  container.innerHTML = '<p class="msg-info">Loading books…</p>';
+  try {
+    const [, store] = await localModules();
+    localPoolData = await store.createStore().pool(id);
+    availableBooks = localPoolData.books;
+    applyPoolTypes();
+    updateGenerateButton();
+    if (!availableBooks.length) {
+      container.innerHTML = '<p class="msg-info">No references found in this question set.</p>';
+      return;
+    }
+    renderBookSelection(availableBooks);
+    showStep("step-2");
+  } catch (err) {
+    container.innerHTML = `<p class="msg-error">Failed to load books: ${escapeHtml(err.message)}</p>`;
+  }
 }
 
 // ── Book Selection (table) ──
@@ -213,7 +258,8 @@ function selectedBookFilters() {
 // The server keeps a count per type for each pool. A pool with no record (an empty object)
 // is treated as offering everything, so nothing is grayed out on a guess.
 function selectedPoolTypes() {
-  const counts = availablePools.find(pool => pool.id === selectedPoolId)?.type_counts;
+  const counts = localPoolData ? localPoolData.type_counts
+    : availablePools.find(pool => pool.id === selectedPoolId)?.type_counts;
   return counts && Object.keys(counts).length ? counts : null;
 }
 
@@ -324,18 +370,20 @@ function updateCustomTotal() {
   try {
     const { counts, total } = selectedCustomCounts();
     const books = selectedBookFilters();
-    if (!selectedPoolId || !books.length) throw new Error("Select at least one book.");
+    if ((!selectedPoolId && !localPoolData) || !books.length) throw new Error("Select at least one book.");
     validation.textContent = "Checking counts and chapter limits...";
     validationTimer = setTimeout(async () => {
       try {
-        const data = await api("/api/generate/validate", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            pool_id: selectedPoolId, question_type: "custom", count: total,
-            custom_counts: counts, books,
-          }),
-        });
+        const data = localPoolData
+          ? (await localModules())[0].validateCustom(localPoolData.questions, counts, books)
+          : await api("/api/generate/validate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pool_id: selectedPoolId, question_type: "custom", count: total,
+              custom_counts: counts, books,
+            }),
+          });
         if (version !== validationVersion) return;
         customAvailable = data.available;
         customValid = data.valid === true;
@@ -355,7 +403,7 @@ function updateCustomTotal() {
 }
 
 document.getElementById("generateBtn")?.addEventListener("click", async () => {
-  if (!selectedPoolId) { showGenerationError("Select a pool first."); return; }
+  if (!selectedPoolId && !localPoolData) { showGenerationError("Select a pool first."); return; }
 
   const books = selectedBookFilters();
   if (books.length === 0) { showGenerationError("Select at least one book."); return; }
@@ -387,21 +435,30 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
     }
     const prefix = document.getElementById("setNamePrefix")?.value || "SET #";
 
-    // One request for every set; the server derives set i's seed as seed + i.
-    const data = await api("/api/generate", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        pool_id: selectedPoolId,
-        question_type: mode === "custom" ? "custom" : "standard",
-        count,
-        situation: mode === "situation",
-        custom_counts: customCounts,
-        seed,
-        books,
-        sets: numSets,
-      }),
-    });
+    // One request for every set; the server derives set i's seed as seed + i. A question set kept
+    // on this device is turned into sets right here instead.
+    const data = localPoolData
+      ? {
+        sets: (await localModules())[0].generateSets(localPoolData.questions, {
+          mode: mode === "custom" ? "custom" : "standard",
+          situation: mode === "situation", counts: customCounts, seed, sets: numSets, books,
+        }),
+        pool: { name: localPoolData.name, label: `${localPoolData.name} (this device)`, print_message: "" },
+      }
+      : await api("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pool_id: selectedPoolId,
+          question_type: mode === "custom" ? "custom" : "standard",
+          count,
+          situation: mode === "situation",
+          custom_counts: customCounts,
+          seed,
+          books,
+          sets: numSets,
+        }),
+      });
     const sets = data.sets || [];
     const names = sets.map((_, i) => `${prefix}${i + 1}`);
     if (data.pool) generatedPool = data.pool;
@@ -422,7 +479,7 @@ document.getElementById("generateBtn")?.addEventListener("click", async () => {
 
 function poolSourceLabel() {
   if (!generatedPool) return "";
-  return `${generatedPool.name} (${generatedPool.tier_name} tier)`;
+  return generatedPool.label || `${generatedPool.name} (${generatedPool.tier_name} tier)`;
 }
 
 function displayResults(sets, prefix) {

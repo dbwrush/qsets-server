@@ -555,6 +555,17 @@ async fn study_returns_filtered_questions_without_saving_a_session(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn files_page_is_public_and_says_nothing_is_uploaded(pool: PgPool) {
+    let app = app(&pool);
+    let response = app.oneshot(get("/files", None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let page = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(page.contains("Your files"));
+    assert!(page.contains("Nothing is uploaded"));
+}
+
+#[sqlx::test]
 async fn study_enforces_private_and_shared_pool_access(pool: PgPool) {
     let app = app(&pool);
     let public = public_tier(&pool).await;

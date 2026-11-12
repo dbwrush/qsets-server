@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Your files — QSets</title>
+  <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#f3ede2" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)" />
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+  <script src="/static/pwa.js" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=local-1" />
+</head>
+<body data-csrf="{{ csrf_token }}">
+  {% include "_header.html" %}
+  <main>
+    <section class="page-intro">
+      <p class="eyebrow">On this device</p>
+      <h1 class="page-title">Your files</h1>
+      <p class="lede">Add question set files (.rtf) you already have, group them into named sets, then use them to generate new sets or to study. Files are read and kept in this browser only. Nothing is uploaded.</p>
+    </section>
+
+    <section class="panel">
+      <h2>New question set</h2>
+      <form id="newSetForm" class="local-new">
+        <div class="form-group"><label for="newSetName">Name</label><input id="newSetName" type="text" maxlength="80" placeholder="e.g. John 1–4" required /></div>
+        <button class="btn-primary">Create</button>
+      </form>
+      <p id="filesStatus" role="status"></p>
+    </section>
+
+    <div id="localSets"></div>
+  </main>
+  <script src="/static/header.js?v=pool-messages-1"></script>
+  <script type="module" src="/static/files.js?v=local-1"></script>
+</body>
+</html>

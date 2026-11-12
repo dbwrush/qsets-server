@@ -1492,3 +1492,19 @@ button.editor-row-summary:hover { background: var(--accent-tint); }
 .editor-row-ref { flex: 0 0 auto; color: var(--muted); font-size: 0.9rem; }
 .editor-row-open .editor-question { margin: 0.25rem 0 0.5rem; background: var(--sheet-2); }
 @media (max-width: 640px) { .editor-row-ref { display: none; } }
+
+/* Question sets kept on this device */
+.local-heading { margin: 1.5rem 0 0.25rem; }
+.local-new { display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; }
+.local-new .form-group { flex: 1 1 16rem; margin: 0; }
+.local-files { list-style: none; margin: 0.5rem 0 1rem; padding: 0; }
+.local-files li { display: flex; gap: 0.5rem; align-items: center; justify-content: space-between; padding: 0.25rem 0; }
+.local-drop {
+  border: 2px dashed var(--rule-strong);
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 0.5rem 0 1rem;
+  text-align: center;
+}
+.local-drop.dragging { background: var(--accent-tint); }
+.local-drop label { display: block; cursor: pointer; margin-bottom: 0.5rem; }

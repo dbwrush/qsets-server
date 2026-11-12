@@ -65,6 +65,13 @@ struct StudyTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "files.html")]
+struct FilesTemplate<'a> {
+    csrf_token: &'a str,
+    header: Header,
+}
+
+#[derive(Template)]
 #[template(path = "pool_editor.html")]
 struct PoolEditorTemplate<'a> {
     csrf_token: &'a str,
@@ -129,6 +136,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/study", get(study_page))
         .route("/study/offline", get(study_offline_shell))
+        .route("/files", get(files_page))
         .route("/login", get(login))
         .route("/register", get(register_page))
         .route("/forgot-password", get(forgot_password_page))
@@ -151,6 +159,18 @@ async fn study_page(State(state): State<AppState>, jar: CookieJar) -> Response {
             csrf_token: &csrf,
             header: Header::new(user.as_ref()),
             offline_shell: false,
+        },
+    )
+}
+
+async fn files_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let (jar, csrf) = security::ensure_csrf_cookie(jar);
+    let user = signed_in_user(&state, &jar).await;
+    render(
+        jar,
+        FilesTemplate {
+            csrf_token: &csrf,
+            header: Header::new(user.as_ref()),
         },
     )
 }
