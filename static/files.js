@@ -117,4 +117,22 @@ $("newSetForm").addEventListener("submit", async event => {
   }
 });
 
+// Shown once per browser session before anything can be added. Cancelling leaves the page.
+const NOTICE = {
+  name: "Your files stay on your device",
+  popup_message: [
+    "Your files never leave this device. They are processed entirely in your browser and are never uploaded to, stored by, or seen by the QSets server.",
+    "Only use files you have permission to use.",
+  ].join("\n\n"),
+};
+let acknowledged = false;
+try { acknowledged = sessionStorage.getItem("qsets-files-notice") === "1"; } catch { /* ask again */ }
+if (!acknowledged) {
+  if (!(await window.qsetsPoolNotice(NOTICE))) {
+    location.href = "/";
+  } else {
+    try { sessionStorage.setItem("qsets-files-notice", "1"); } catch { /* ask again next time */ }
+  }
+}
+
 await render();
